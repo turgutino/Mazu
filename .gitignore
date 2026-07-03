@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Mazu runtime state (per-project memory, checkpoints, skills) — local to each
+# machine/project, never meant to be committed. `mazu init` also writes this entry
+# into a project's own .gitignore for the same reason.
+.mazu/
+
+# Secrets / local config — API keys must only ever live in environment variables
+# or ~/.mazu/config.toml (outside the repo), never in a tracked file.
+.env
+.env.*
+*.pem
+*.key
+config.toml
+
+# Test / coverage artifacts
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Claude Code's own local session state — not part of the project
+.claude/
