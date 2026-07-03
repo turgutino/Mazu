@@ -1,8 +1,14 @@
+import platform
 import re
 import subprocess
 from pathlib import Path
 
 from mazu.tools.base import Tool, ToolResult
+
+# subprocess.run(shell=True) always goes through cmd.exe on Windows (via %COMSPEC%),
+# regardless of what shell the user's own terminal happens to be — so this is an
+# accurate, not just a best-guess, description of what actually executes the command.
+_SHELL_LABEL = "Windows cmd.exe" if platform.system() == "Windows" else "a POSIX shell (sh)"
 
 # Hardcoded backstop regardless of confirmation or --allow-shell: checkpoints undo
 # file damage, not irreversible external actions (force-pushes, key exfiltration,
@@ -49,7 +55,14 @@ def make_shell_tool(root: Path, timeout: int = 60) -> Tool:
 
     return Tool(
         name="run_shell",
-        description="Run a shell command in the project root and return its stdout/stderr/exit code.",
+        description=(
+            "Run a shell command in the project root and return its stdout/stderr/exit code. "
+            f"Commands execute via {_SHELL_LABEL} — use syntax native to that shell, not "
+            "another OS's. For example, on Windows cmd.exe, `mkdir` already creates "
+            "intermediate directories on its own and does not understand a Unix-style `-p` "
+            "flag; passing one silently creates a stray directory literally named `-p` "
+            "instead of raising an error, so don't assume Unix flags work here."
+        ),
         input_schema={
             "type": "object",
             "properties": {"command": {"type": "string"}},

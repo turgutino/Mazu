@@ -1,6 +1,6 @@
 [project]
 name = "mazu"
-version = "0.1.2"
+version = "0.1.3"
 description = "A memory-augmented, checkpointable coding agent CLI."
 readme = "README.md"
 requires-python = ">=3.11"
