@@ -31,12 +31,18 @@ Everything above (agent loop, tool execution, memory database, skill library, ch
 Requires **Python 3.11+** and **git** (used for checkpoints).
 
 ```bash
-git clone https://github.com/<your-username>/mazu.git
-cd mazu
-pip install -e .
+pip install mazu
 
 # Only needed for openai:* or deepseek:* models (DeepSeek's API is OpenAI-compatible,
 # so it reuses the same client library under a different base URL):
+pip install "mazu[openai]"
+```
+
+To work on Mazu itself instead, install it from source in editable mode:
+
+```bash
+git clone https://github.com/turgutino/Mazu.git
+cd Mazu
 pip install -e ".[openai]"
 ```
 

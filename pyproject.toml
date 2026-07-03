@@ -5,6 +5,34 @@ description = "A memory-augmented, checkpointable coding agent CLI."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
+authors = [
+    { name = "Turgut Sofuyev", email = "turgut.sofuyev@gmail.com" },
+]
+keywords = [
+    "ai",
+    "agent",
+    "coding-agent",
+    "cli",
+    "llm",
+    "memory",
+    "anthropic",
+    "openai",
+    "deepseek",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development",
+    "Topic :: Software Development :: Build Tools",
+    "Topic :: Utilities",
+]
 dependencies = [
     "anthropic>=0.40.0",
     "click>=8.1",
@@ -12,6 +40,11 @@ dependencies = [
 
 [project.optional-dependencies]
 openai = ["openai>=1.0"]
+
+[project.urls]
+Homepage = "https://github.com/turgutino/Mazu"
+Repository = "https://github.com/turgutino/Mazu"
+Issues = "https://github.com/turgutino/Mazu/issues"
 
 [project.scripts]
 mazu = "mazu.cli:main"
