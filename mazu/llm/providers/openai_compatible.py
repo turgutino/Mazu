@@ -121,9 +121,12 @@ class OpenAICompatibleProvider(Provider):
     def run_turn(
         self, messages: list[dict], system: str, tools: list[dict], model: str
     ) -> AgentResponse:
+        # _get_client() must run first: it's the one that turns a missing `openai`
+        # package into a clean MazuAuthError. Importing it unconditionally here would
+        # raise a raw ModuleNotFoundError before that guard ever runs.
+        client = self._get_client()
         import openai
 
-        client = self._get_client()
         try:
             response = client.chat.completions.create(
                 model=model,
@@ -157,9 +160,9 @@ class OpenAICompatibleProvider(Provider):
     def run_forced_tool(
         self, messages: list[dict], system: str, tool: dict, model: str
     ) -> dict:
+        client = self._get_client()
         import openai
 
-        client = self._get_client()
         openai_tool = {
             "type": "function",
             "function": {
