@@ -1,4 +1,5 @@
 import os
+from typing import Callable
 
 from mazu.llm.providers.anthropic_provider import AnthropicProvider
 from mazu.llm.providers.deepseek_provider import DeepSeekProvider
@@ -74,6 +75,25 @@ def run_turn(
     """
     _, provider, model_name = _resolve_provider(model)
     return with_retry(lambda: provider.run_turn(messages, system, tools, model_name))
+
+
+def run_turn_stream(
+    messages: list[dict],
+    system: str,
+    tools: list[dict],
+    on_delta: Callable[[str], None],
+    model: str | None = None,
+) -> AgentResponse:
+    """Like run_turn(), but delivers text as it's generated via `on_delta` instead of
+    only once the full response is back. Deliberately NOT wrapped in with_retry(): by
+    the time a transient error can occur, on_delta may have already been called with
+    partial text that's already been printed to the user, so a silent retry would
+    re-invoke on_delta from scratch and print duplicate, visually broken output.
+    Letting the error propagate directly (same as any non-retried MazuAPIError) means
+    the caller's existing error handling shows one clean message instead.
+    """
+    _, provider, model_name = _resolve_provider(model)
+    return provider.run_turn_stream(messages, system, tools, model_name, on_delta)
 
 
 def run_forced_tool(

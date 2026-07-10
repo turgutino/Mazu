@@ -1,5 +1,6 @@
 import json
 import os
+from typing import Callable
 
 from mazu.llm.error_mapping import classify_sdk_error
 from mazu.llm.errors import MazuAPIError, MazuAuthError
@@ -155,6 +156,72 @@ class OpenAICompatibleProvider(Provider):
 
         stop_reason = "tool_use" if choice.message.tool_calls else "end_turn"
         usage = response.usage.model_dump() if response.usage else {}
+        return AgentResponse(stop_reason=stop_reason, content=content_blocks, usage=usage)
+
+    def run_turn_stream(
+        self,
+        messages: list[dict],
+        system: str,
+        tools: list[dict],
+        model: str,
+        on_delta: Callable[[str], None],
+    ) -> AgentResponse:
+        client = self._get_client()
+        import openai
+
+        text_parts: list[str] = []
+        # Tool-call arguments arrive as fragmented JSON string deltas, keyed by their
+        # position in the response (`index`), not by id -- the id/name may only appear
+        # on the first delta for that index, with further deltas carrying just an
+        # `arguments` fragment to append. Must accumulate by index before parsing.
+        tool_calls: dict[int, dict] = {}
+        usage: dict = {}
+        try:
+            stream = client.chat.completions.create(
+                model=model,
+                messages=_to_openai_messages(system, messages),
+                tools=_to_openai_tools(tools),
+                stream=True,
+                stream_options={"include_usage": True},
+            )
+            for chunk in stream:
+                if chunk.usage is not None:
+                    usage = chunk.usage.model_dump()
+                if not chunk.choices:
+                    continue  # the final usage-only chunk has an empty choices list
+                delta = chunk.choices[0].delta
+                if delta.content:
+                    text_parts.append(delta.content)
+                    on_delta(delta.content)
+                for tc_delta in delta.tool_calls or []:
+                    slot = tool_calls.setdefault(
+                        tc_delta.index, {"id": None, "name": None, "arguments": ""}
+                    )
+                    if tc_delta.id:
+                        slot["id"] = tc_delta.id
+                    if tc_delta.function and tc_delta.function.name:
+                        slot["name"] = tc_delta.function.name
+                    if tc_delta.function and tc_delta.function.arguments:
+                        slot["arguments"] += tc_delta.function.arguments
+        except openai.OpenAIError as e:
+            raise classify_sdk_error(openai, e) from e
+
+        content_blocks = []
+        text = "".join(text_parts)
+        if text:
+            content_blocks.append({"type": "text", "text": text})
+        for index in sorted(tool_calls):
+            tc = tool_calls[index]
+            content_blocks.append(
+                {
+                    "type": "tool_use",
+                    "id": tc["id"],
+                    "name": tc["name"],
+                    "input": _parse_tool_arguments(tc["arguments"]),
+                }
+            )
+
+        stop_reason = "tool_use" if tool_calls else "end_turn"
         return AgentResponse(stop_reason=stop_reason, content=content_blocks, usage=usage)
 
     def run_forced_tool(

@@ -1,4 +1,5 @@
 import os
+from typing import Callable
 
 from mazu.llm.error_mapping import classify_sdk_error
 from mazu.llm.errors import MazuAuthError
@@ -57,6 +58,46 @@ class AnthropicProvider(Provider):
             stop_reason=response.stop_reason,
             content=[block.model_dump() for block in response.content],
             usage=response.usage.model_dump(),
+        )
+
+    def run_turn_stream(
+        self,
+        messages: list[dict],
+        system: str,
+        tools: list[dict],
+        model: str,
+        on_delta: Callable[[str], None],
+    ) -> AgentResponse:
+        import anthropic
+
+        client = self._get_client()
+        try:
+            with client.messages.stream(
+                model=model,
+                max_tokens=MAX_TOKENS,
+                system=[
+                    {
+                        "type": "text",
+                        "text": system,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+                messages=messages,
+                tools=tools,
+            ) as stream:
+                for text in stream.text_stream:
+                    on_delta(text)
+                # get_final_message() returns the exact same shape as messages.create()'s
+                # return value, so it goes through identical parsing to the non-streaming
+                # path below -- streaming only changes *when* text is delivered, not how
+                # the final content blocks (including tool_use) are built.
+                final = stream.get_final_message()
+        except anthropic.AnthropicError as e:
+            raise classify_sdk_error(anthropic, e) from e
+        return AgentResponse(
+            stop_reason=final.stop_reason,
+            content=[block.model_dump() for block in final.content],
+            usage=final.usage.model_dump(),
         )
 
     def run_forced_tool(

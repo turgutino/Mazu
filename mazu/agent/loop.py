@@ -3,7 +3,7 @@ from mazu.agent.interaction import safe_confirm
 from mazu.agent.session import finalize_session
 from mazu.banner import print_banner
 from mazu.checkpoint.manager import CheckpointManager
-from mazu.llm.client import _split_model, default_model, run_turn, summarize_usage
+from mazu.llm.client import _split_model, default_model, run_turn_stream, summarize_usage
 from mazu.llm.errors import MazuAPIError
 from mazu.memory.store import MemoryStore
 from mazu.skills.manager import SkillManager
@@ -112,17 +112,27 @@ def _run_until_done(
     messages: list[dict], registry: ToolRegistry, system_prompt: str, model: str | None
 ) -> None:
     while True:
+        streamed_any_text = False
+
+        def _on_delta(chunk: str) -> None:
+            nonlocal streamed_any_text
+            streamed_any_text = True
+            print(chunk, end="", flush=True)
+
         try:
-            response = run_turn(messages, system_prompt, registry.schemas(), model=model)
+            response = run_turn_stream(
+                messages, system_prompt, registry.schemas(), on_delta=_on_delta, model=model
+            )
         except MazuAPIError as e:
             print(f"\n[error] {e}\nReturning to the prompt — try again, or use /rollback.")
             return
         messages.append({"role": "assistant", "content": response.content})
+        # Text was already printed live as it streamed in; usage can only be known
+        # once the stream is fully done, so it prints after (not before, like the
+        # old non-streaming order) with a newline to close off the streamed line.
+        if streamed_any_text:
+            print()
         print(f"[usage] {summarize_usage(response.usage)}")
-
-        text_blocks = [b["text"] for b in response.content if b["type"] == "text"]
-        if text_blocks:
-            print("\n".join(text_blocks))
 
         if response.stop_reason != "tool_use":
             return

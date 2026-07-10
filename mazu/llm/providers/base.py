@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from typing import Callable
 
 from mazu.llm.types import AgentResponse
 
@@ -29,3 +30,25 @@ class Provider(ABC):
         guaranteed-shape result rather than an ordinary agentic turn.
         """
         ...
+
+    def run_turn_stream(
+        self,
+        messages: list[dict],
+        system: str,
+        tools: list[dict],
+        model: str,
+        on_delta: Callable[[str], None],
+    ) -> AgentResponse:
+        """Default fallback for any provider that doesn't override this with real
+        token-by-token streaming: runs the ordinary non-streaming call, then delivers
+        the full text to `on_delta` in one shot once it's back. This guarantees every
+        provider is callable through the streaming seam (a future provider that never
+        gets a streaming override still works correctly, just without a live typing
+        effect) instead of requiring every subclass to implement streaming to remain
+        usable at all.
+        """
+        response = self.run_turn(messages, system, tools, model)
+        text = "\n".join(b["text"] for b in response.content if b.get("type") == "text")
+        if text:
+            on_delta(text)
+        return response
