@@ -4,6 +4,7 @@ from pathlib import Path
 
 import click
 
+from mazu import __version__
 from mazu.agent.autonomous import run_autonomous
 from mazu.agent.council import run_council
 from mazu.agent.loop import run_chat_loop
@@ -71,6 +72,7 @@ def _build_registry(
 
 
 @click.group()
+@click.version_option(version=__version__, prog_name="mazu")
 def main() -> None:
     """Mazu — a memory-augmented, checkpointable coding agent."""
 
@@ -258,6 +260,21 @@ def checkpoint(ctx: click.Context) -> None:
     checkpoint_manager = CheckpointManager(root)
     entry = checkpoint_manager.snapshot(messages=[], trigger="manual_cli")
     click.echo(f"Checkpoint {entry['id']} saved (commit {entry['git_commit'][:8]}).")
+
+
+@checkpoint.command("list")
+def checkpoint_list() -> None:
+    """List all checkpoints for the current project, most recent last."""
+    root = Path.cwd()
+    checkpoint_manager = CheckpointManager(root)
+    entries = checkpoint_manager.list_checkpoints()
+    if not entries:
+        click.echo("No checkpoints yet.")
+        return
+    for entry in entries:
+        click.echo(
+            f"{entry['id']}  {entry['created_at']}  ({entry['trigger']}) {entry['summary']}"
+        )
 
 
 @checkpoint.command("prune")

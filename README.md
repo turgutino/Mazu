@@ -151,6 +151,7 @@ When the agent solves a reusable problem, it can save the solution as a plain Py
 
 ```bash
 mazu checkpoint                     # manually snapshot code + memory (outside a chat session)
+mazu checkpoint list                # list all checkpoints for this project
 mazu checkpoint prune --keep 20     # drop old on-disk snapshot copies (git history is untouched)
 mazu rollback                       # restore to the most recent checkpoint
 mazu rollback cp_000003             # restore to a specific one
@@ -214,21 +215,22 @@ The project-scoped memory database lives at `.mazu/memory.db` (created by `mazu 
 - Shell commands go through a shared denylist (destructive/irreversible patterns) in **both** `mazu chat` and `mazu run`, regardless of confirmation settings.
 - API keys are only ever read from environment variables or `~/.mazu/config.toml` (outside any repo) — Mazu never writes a key to disk itself, and `.mazu/`, `.env`, and `config.toml` are all gitignored by default.
 - `mazu run` refuses to start with uncommitted changes already present, so autonomous edits are always diffable against a clean baseline.
+- See [SECURITY.md](SECURITY.md) for the full policy and how to report a vulnerability.
 
 ## Status & roadmap
 
-Milestones M1–M4 (bare tool loop, persistent memory, checkpoint/rollback, supervised autonomy) all have a working implementation, plus multi-provider support and council mode on top. This has been exercised through live testing against real Anthropic, OpenAI, and DeepSeek API keys — chat/run tool use, memory recall (project and global), skill save/run, checkpoint/rollback (including pruning and skill restoration), memory supersede, and parallel council queries have all been verified working end-to-end.
+Milestones M1–M4 (bare tool loop, persistent memory, checkpoint/rollback, supervised autonomy) all have a working implementation, plus multi-provider support, council mode, real-time streaming (`mazu chat`), and automatic context compaction (`mazu run`) on top. This has been exercised through live testing against real Anthropic, OpenAI, and DeepSeek API keys — chat/run tool use, memory recall (project and global), skill save/run, checkpoint/rollback (including pruning and skill restoration), memory supersede, and parallel council queries have all been verified working end-to-end. A test suite covers the core logic (memory dedup/supersede, BM25 ranking, checkpoint snapshot/restore, provider routing, streaming response parsing, context-compaction correctness) with zero API cost, running on every push via GitHub Actions across Python 3.11–3.13 on Linux/Windows/macOS.
 
 **Known gaps, honestly listed:**
-- No automated test suite yet (`pytest`) — verification so far has been live testing plus ad-hoc smoke scripts, not a checked-in regression suite.
 - No semantic/embedding-based memory retrieval yet — BM25 is a solid, zero-cost baseline, but pure keyword ranking can miss a relevant memory that's phrased very differently from the current task.
 - Checkpoint/rollback is linear (like `git reset --hard`), not a branching tree.
-- No context compaction for very long autonomous runs — a run that grows the conversation past a model's context window will surface a clear error rather than crash, but won't automatically summarize and continue.
-- Windows-only testing so far; Mac/Linux should work (nothing OS-specific in the design) but hasn't been verified live.
+- Streaming is `mazu chat`-only for now — `mazu run` and `mazu council` still return complete responses, not token-by-token (streaming plus mid-stream confirmation prompts, or interleaved parallel council output, are separate design questions).
+- Context compaction is `mazu run`-only for now, for the same reason.
+- Live testing so far has been on Windows; Mac/Linux should work (nothing OS-specific in the design, and CI now runs the test suite on all three) but hasn't been verified against a real provider outside of CI's mocked tests.
 - No `mazu memory consolidate` command yet for manually merging/cleaning up accumulated memories.
 - No Google Gemini provider yet — the adapter interface is designed to make this a small addition, not a redesign.
 
-Contributions and issue reports are welcome.
+Contributions and issue reports are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

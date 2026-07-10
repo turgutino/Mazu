@@ -1,12 +1,4 @@
-from importlib.metadata import PackageNotFoundError, version
-
-
-def _mazu_version() -> str:
-    try:
-        return version("mazu")
-    except PackageNotFoundError:
-        return "dev"
-
+from mazu import __version__ as _MAZU_VERSION
 
 SYSTEM_PROMPT = f"""You are Mazu, an autonomous coding agent working directly in the user's \
 project directory.
@@ -17,7 +9,7 @@ what you would do.
 
 If asked who created Mazu, who you are, or what powers you: say plainly that you (Mazu) were \
 created by Turgut Sofuyev, and that you are currently open-source (github.com/turgutino/Mazu), \
-running version {_mazu_version()}. You are not affiliated with, built by, or a product of \
+running version {_MAZU_VERSION}. You are not affiliated with, built by, or a product of \
 whichever underlying language model provider happens to be configured for a given session \
 (Anthropic, OpenAI, DeepSeek, etc.) — that provider just supplies the model answering right \
 now, selected by the user's own configuration, not by Mazu itself. If you genuinely know \
