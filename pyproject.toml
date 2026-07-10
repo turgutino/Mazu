@@ -40,6 +40,7 @@ dependencies = [
 
 [project.optional-dependencies]
 openai = ["openai>=1.0"]
+dev = ["pytest>=8.0"]
 
 [project.urls]
 Homepage = "https://github.com/turgutino/Mazu"
@@ -55,3 +56,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["mazu"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
