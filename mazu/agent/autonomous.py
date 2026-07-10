@@ -1,10 +1,11 @@
+from mazu.agent.compaction import compact_if_needed, force_compact
 from mazu.agent.context import build_system_prompt
 from mazu.agent.interaction import safe_confirm
 from mazu.agent.session import finalize_session
 from mazu.banner import print_banner
 from mazu.checkpoint.manager import CheckpointManager
 from mazu.llm.client import _split_model, default_model, run_turn, summarize_usage
-from mazu.llm.errors import MazuAPIError
+from mazu.llm.errors import MazuAPIError, MazuContextLengthError
 from mazu.llm.pricing import estimate_cost
 from mazu.memory.store import MemoryStore
 from mazu.skills.manager import SkillManager
@@ -66,9 +67,25 @@ def run_autonomous(
     try:
         while step < max_steps:
             step += 1
+            messages, compacted = compact_if_needed(messages, model)
+            if compacted:
+                print(f"[context] compacted conversation history ({len(messages)} messages remain)")
             try:
                 try:
-                    response = run_turn(messages, system_prompt, registry.schemas(), model=model)
+                    try:
+                        response = run_turn(messages, system_prompt, registry.schemas(), model=model)
+                    except MazuContextLengthError:
+                        # The proactive char-based estimate can undershoot (very dense
+                        # tool output, a single huge message) -- this is the safety net.
+                        # Compact much more aggressively than the proactive pass and
+                        # retry exactly once; if it still fails, the error falls through
+                        # to the same MazuAPIError handling as any other failure below.
+                        print(
+                            "\n[context] hit the model's context limit — compacting "
+                            "aggressively and retrying once"
+                        )
+                        messages = force_compact(messages, model)
+                        response = run_turn(messages, system_prompt, registry.schemas(), model=model)
                 except MazuAPIError as e:
                     print(f"\n[error] {e}")
                     consecutive_failures += 1
