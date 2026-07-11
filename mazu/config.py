@@ -1,8 +1,14 @@
 import os
+import platform
 import tomllib
 from pathlib import Path
 
 CONFIG_PATH = Path.home() / ".mazu" / "config.toml"
+
+# `export VAR=...` is bash/zsh syntax and does nothing useful if pasted into
+# Windows cmd.exe (it either errors or silently sets a literal variable named
+# "export" nobody reads) -- show the syntax that actually works in the user's shell.
+_SET_ENV_EXAMPLE = "set {var}=..." if platform.system() == "Windows" else "export {var}=..."
 
 
 def load_config() -> dict:
@@ -40,6 +46,6 @@ def ensure_api_key(model: str | None = None) -> None:
     if not os.environ.get(env_var):
         raise SystemExit(
             f"No API key found for provider '{provider_name}' (needs {env_var}).\n"
-            f"Set it with: export {env_var}=...\n"
+            f"Set it with: {_SET_ENV_EXAMPLE.format(var=env_var)}\n"
             "or pass --model provider:model to use a different provider you already have a key for."
         )
