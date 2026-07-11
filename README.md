@@ -99,7 +99,7 @@ Inside the `>` prompt, two extra commands are always available:
 | `/checkpoint` | Snapshot code, memory, and the live conversation right now |
 | `/rollback [id]` | Restore all three to that checkpoint (defaults to the most recent one) |
 
-Any destructive tool call (writing a file, editing a file, running a shell command) asks for confirmation first.
+Any destructive tool call (writing a file, editing a file, running a shell command) asks for confirmation first. Responses stream in as they're generated (token-by-token where the provider supports it), and each response's `[usage]` line includes a running estimated cost for the session where pricing data is available.
 
 ### Autonomous runs
 
@@ -123,6 +123,17 @@ Key flags:
 By default, file writes/edits proceed unattended in `run` mode (checkpoints make them recoverable), but shell commands still ask for confirmation unless `--allow-shell` is passed. Regardless of that flag, a hardcoded denylist always blocks a short list of genuinely dangerous commands: force-pushing, `sudo`, touching `~/.ssh`, disk-format commands, and `rm -rf /`-style wipes. Checkpoints undo file damage — they can't undo an irreversible external action like a force-push or a sent network request, so that backstop stays even with `--allow-shell`.
 
 `mazu run` refuses to start on a dirty working tree, so the first checkpoint is always a clean baseline. If it's interrupted with **Ctrl-C**, you're offered `[c]ontinue`, `[r]ollback <id>`, or `[q]uit` before anything is lost.
+
+### Cost & usage tracking
+
+Every `mazu chat`, `mazu run`, and `mazu council` call is logged (provider, model, tokens, estimated cost) to a small local store at `~/.mazu/usage.db` — global across every project, since spend is tied to your API keys, not any one codebase.
+
+```bash
+mazu usage                  # total estimated spend, all time, broken down by model
+mazu usage --since-days 7   # only the last 7 days
+```
+
+Like `--max-cost`, this is an *estimate* from a built-in, occasionally-stale pricing table (see [`mazu/llm/pricing.py`](mazu/llm/pricing.py)) — treat it as a helpful approximation, not a substitute for your provider's own billing dashboard.
 
 ### Memory
 

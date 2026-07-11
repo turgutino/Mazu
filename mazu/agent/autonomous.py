@@ -11,6 +11,7 @@ from mazu.memory.store import MemoryStore
 from mazu.skills.manager import SkillManager
 from mazu.tools.registry import ToolRegistry
 from mazu.tools.shell import is_denied_shell_command
+from mazu.usage.store import UsageStore
 
 
 def run_autonomous(
@@ -27,6 +28,7 @@ def run_autonomous(
     max_consecutive_failures: int = 3,
     max_cost: float | None = None,
     model: str | None = None,
+    usage_store: UsageStore | None = None,
 ) -> None:
     if checkpoint_manager.is_dirty():
         print(
@@ -104,10 +106,15 @@ def run_autonomous(
                 step_out = usage.get("output_tokens", usage.get("completion_tokens", 0)) or 0
                 total_in += step_in
                 total_out += step_out
+                step_cost = estimate_cost(resolved_model, step_in, step_out) if cost_trackable else None
                 cost_suffix = ""
-                if cost_trackable:
-                    total_cost += estimate_cost(resolved_model, step_in, step_out) or 0.0
+                if step_cost is not None:
+                    total_cost += step_cost
                     cost_suffix = f" | ~${total_cost:.4f} so far"
+                if usage_store is not None:
+                    usage_store.log(
+                        "run", session_id, provider_name, model_name, step_in, step_out, step_cost
+                    )
                 print(
                     f"[usage] step: {summarize_usage(usage)} | "
                     f"running total: {total_in} in, {total_out} out{cost_suffix}"
@@ -152,6 +159,8 @@ def run_autonomous(
             finalize_session(memory_store, session_id, messages, model=model)
         if global_memory_store is not None:
             global_memory_store.close()
+        if usage_store is not None:
+            usage_store.close()
 
 
 def _execute_round(

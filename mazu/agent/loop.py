@@ -5,10 +5,12 @@ from mazu.banner import print_banner
 from mazu.checkpoint.manager import CheckpointManager
 from mazu.llm.client import _split_model, default_model, run_turn_stream, summarize_usage
 from mazu.llm.errors import MazuAPIError
+from mazu.llm.pricing import estimate_cost
 from mazu.memory.store import MemoryStore
 from mazu.skills.manager import SkillManager
 from mazu.tools.registry import ToolRegistry
 from mazu.tools.shell import is_denied_shell_command
+from mazu.usage.store import UsageStore
 
 
 def _confirm(tool_name: str, tool_input: dict) -> bool:
@@ -24,13 +26,17 @@ def run_chat_loop(
     skill_manager: SkillManager | None = None,
     checkpoint_manager: CheckpointManager | None = None,
     model: str | None = None,
+    usage_store: UsageStore | None = None,
 ) -> None:
     messages: list[dict] = []
     system_prompt = None  # built lazily from the first real task, so retrieval has a query
+    total_cost = 0.0
 
     print_banner()
     provider_name, model_name = _split_model(model or default_model())
-    print(f"model: {provider_name}:{model_name}")
+    resolved_model = f"{provider_name}:{model_name}"
+    cost_trackable = estimate_cost(resolved_model, 0, 0) is not None
+    print(f"model: {resolved_model}")
     print(
         "chat — type your task. Commands: /checkpoint, /rollback [id]. Ctrl+C to quit.\n"
     )
@@ -64,12 +70,24 @@ def run_chat_loop(
                     print("[memory] loaded prior context relevant to this task\n")
 
             messages.append({"role": "user", "content": user_input})
-            _run_until_done(messages, registry, system_prompt, model)
+            total_cost = _run_until_done(
+                messages,
+                registry,
+                system_prompt,
+                model,
+                resolved_model,
+                cost_trackable,
+                usage_store,
+                session_id,
+                total_cost,
+            )
     finally:
         if memory_store is not None:
             finalize_session(memory_store, session_id, messages, model=model)
         if global_memory_store is not None:
             global_memory_store.close()
+        if usage_store is not None:
+            usage_store.close()
 
 
 def _handle_checkpoint(checkpoint_manager: CheckpointManager | None, messages: list[dict]) -> None:
@@ -109,8 +127,17 @@ def _handle_rollback(
 
 
 def _run_until_done(
-    messages: list[dict], registry: ToolRegistry, system_prompt: str, model: str | None
-) -> None:
+    messages: list[dict],
+    registry: ToolRegistry,
+    system_prompt: str,
+    model: str | None,
+    resolved_model: str,
+    cost_trackable: bool,
+    usage_store: UsageStore | None,
+    session_id: str,
+    total_cost: float,
+) -> float:
+    provider_name, model_name = _split_model(resolved_model)
     while True:
         streamed_any_text = False
 
@@ -125,17 +152,30 @@ def _run_until_done(
             )
         except MazuAPIError as e:
             print(f"\n[error] {e}\nReturning to the prompt — try again, or use /rollback.")
-            return
+            return total_cost
         messages.append({"role": "assistant", "content": response.content})
         # Text was already printed live as it streamed in; usage can only be known
         # once the stream is fully done, so it prints after (not before, like the
         # old non-streaming order) with a newline to close off the streamed line.
         if streamed_any_text:
             print()
-        print(f"[usage] {summarize_usage(response.usage)}")
+
+        usage = response.usage
+        input_tokens = usage.get("input_tokens", usage.get("prompt_tokens", 0)) or 0
+        output_tokens = usage.get("output_tokens", usage.get("completion_tokens", 0)) or 0
+        step_cost = estimate_cost(resolved_model, input_tokens, output_tokens) if cost_trackable else None
+        cost_suffix = ""
+        if step_cost is not None:
+            total_cost += step_cost
+            cost_suffix = f" | ~${total_cost:.4f} total"
+        if usage_store is not None:
+            usage_store.log(
+                "chat", session_id, provider_name, model_name, input_tokens, output_tokens, step_cost
+            )
+        print(f"[usage] {summarize_usage(usage)}{cost_suffix}")
 
         if response.stop_reason != "tool_use":
-            return
+            return total_cost
 
         tool_results = []
         for block in response.content:

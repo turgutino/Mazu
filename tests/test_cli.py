@@ -10,7 +10,8 @@ import pytest
 from click.testing import CliRunner
 
 import mazu
-from mazu.cli import main
+from mazu.cli import _usage_db_path, main
+from mazu.usage.store import UsageStore
 
 
 @pytest.fixture(autouse=True)
@@ -57,3 +58,48 @@ def test_checkpoint_list_shows_created_checkpoints(tmp_path, monkeypatch):
     result = runner.invoke(main, ["checkpoint", "list"])
     assert result.exit_code == 0, result.output
     assert "cp_000001" in result.output
+
+
+def test_usage_empty(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(main, ["usage"])
+
+    assert result.exit_code == 0
+    assert "No usage recorded yet." in result.output
+
+
+def test_usage_shows_logged_spend(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    # _usage_db_path() resolves via Path.home(), which respects HOME/USERPROFILE --
+    # both already redirected to tmp_path by the autouse _git_identity fixture.
+    store = UsageStore(_usage_db_path())
+    store.log("chat", "s1", "anthropic", "claude-sonnet-5", 1000, 500, 0.0105)
+    store.log("run", "s2", "deepseek", "deepseek-chat", 2000, 1000, 0.0016)
+    store.close()
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["usage"])
+
+    assert result.exit_code == 0, result.output
+    assert "claude-sonnet-5" in result.output
+    assert "deepseek-chat" in result.output
+    assert "0.0121" in result.output  # total = 0.0105 + 0.0016
+
+
+def test_usage_since_days_filters(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = UsageStore(_usage_db_path())
+    store.conn.execute(
+        "INSERT INTO usage_log "
+        "(created_at, command, session_id, provider, model, input_tokens, output_tokens, estimated_cost_usd) "
+        "VALUES ('2020-01-01T00:00:00+00:00', 'chat', 's-old', 'anthropic', 'claude-sonnet-5', 100, 50, 1.0)"
+    )
+    store.conn.commit()
+    store.close()
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["usage", "--since-days", "7"])
+
+    assert result.exit_code == 0, result.output
+    assert "No usage recorded yet." in result.output  # the only row is far outside the window

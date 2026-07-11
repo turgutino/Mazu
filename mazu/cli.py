@@ -18,6 +18,7 @@ from mazu.tools.memory_tools import make_memory_tools
 from mazu.tools.registry import ToolRegistry
 from mazu.tools.shell import make_shell_tool
 from mazu.tools.skill_tools import make_skill_tools
+from mazu.usage.store import UsageStore
 
 # Model output can contain arbitrary Unicode (arrows, em-dashes, emoji) that the
 # default Windows console codepage (cp1252) can't encode, which otherwise crashes
@@ -41,6 +42,12 @@ def _global_memory_db_path() -> Path:
     # Deliberately not tied to any project root — this is the one store shared across
     # every project, for durable facts about the person, not the codebase.
     return Path.home() / ".mazu" / "global_memory.db"
+
+
+def _usage_db_path() -> Path:
+    # Global like global_memory.db — spend is tied to the person/API keys, not any
+    # one project. A separate file on purpose (see UsageStore's docstring).
+    return Path.home() / ".mazu" / "usage.db"
 
 
 def _ensure_gitignore(root: Path) -> None:
@@ -117,6 +124,7 @@ def chat(model: str | None) -> None:
     global_memory_store = MemoryStore(_global_memory_db_path())
     skill_manager = SkillManager(root)
     checkpoint_manager = CheckpointManager(root)
+    usage_store = UsageStore(_usage_db_path())
     session_id = str(uuid.uuid4())
 
     registry = _build_registry(root, memory_store, global_memory_store, skill_manager, session_id)
@@ -129,6 +137,7 @@ def chat(model: str | None) -> None:
         skill_manager=skill_manager,
         checkpoint_manager=checkpoint_manager,
         model=model,
+        usage_store=usage_store,
     )
 
 
@@ -177,6 +186,7 @@ def run(
     skill_manager = SkillManager(root)
     checkpoint_kwargs = {"retention": keep_checkpoints} if keep_checkpoints is not None else {}
     checkpoint_manager = CheckpointManager(root, **checkpoint_kwargs)
+    usage_store = UsageStore(_usage_db_path())
     session_id = str(uuid.uuid4())
 
     registry = _build_registry(root, memory_store, global_memory_store, skill_manager, session_id)
@@ -194,6 +204,7 @@ def run(
         allow_shell=allow_shell,
         max_cost=max_cost,
         model=model,
+        usage_store=usage_store,
     )
 
 
@@ -229,6 +240,7 @@ def council(question: str, models: str, lead: str) -> None:
     memory_store = MemoryStore(_memory_db_path(root))
     global_memory_store = MemoryStore(_global_memory_db_path())
     skill_manager = SkillManager(root)
+    usage_store = UsageStore(_usage_db_path())
     session_id = str(uuid.uuid4())
     registry = _build_registry(root, memory_store, global_memory_store, skill_manager, session_id)
 
@@ -242,10 +254,13 @@ def council(question: str, models: str, lead: str) -> None:
             memory_store=memory_store,
             global_memory_store=global_memory_store,
             skill_manager=skill_manager,
+            usage_store=usage_store,
+            session_id=session_id,
         )
     finally:
         memory_store.close()
         global_memory_store.close()
+        usage_store.close()
 
 
 @main.group(invoke_without_command=True)
@@ -292,6 +307,41 @@ def checkpoint_prune(keep: int | None) -> None:
     checkpoint_manager = CheckpointManager(root, **checkpoint_kwargs)
     pruned = checkpoint_manager.prune()
     click.echo(f"Pruned {pruned} checkpoint(s)." if pruned else "Nothing to prune.")
+
+
+@main.command("usage")
+@click.option(
+    "--since-days",
+    default=None,
+    type=int,
+    help="Only include the last N days (default: all time).",
+)
+def usage_cmd(since_days: int | None) -> None:
+    """Show estimated API spend across every mazu session (all projects, all
+    providers) — approximate, based on the same built-in pricing table --max-cost
+    uses, not a real billing figure."""
+    store = UsageStore(_usage_db_path())
+    summary = store.summary(since_days=since_days)
+    store.close()
+
+    if summary["total_calls"] == 0:
+        click.echo("No usage recorded yet.")
+        return
+
+    window = f"last {since_days} day(s)" if since_days is not None else "all time"
+    click.echo(f"Estimated spend ({window}): ${summary['total_cost']:.4f} across {summary['total_calls']} calls\n")
+    click.echo("By model:")
+    for row in summary["by_model"]:
+        cost = f"${row['cost']:.4f}" if row["cost"] is not None else "(no pricing data)"
+        click.echo(
+            f"  {row['provider']}:{row['model']:<28} {row['calls']:>4} calls   "
+            f"{row['input_tokens']:>8} in / {row['output_tokens']:>8} out   {cost}"
+        )
+    if summary["has_unpriced_calls"]:
+        click.echo(
+            "\nNote: some calls used a model with no entry in the pricing table and "
+            "aren't reflected in the totals above."
+        )
 
 
 @main.command()
