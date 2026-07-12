@@ -179,6 +179,15 @@ mazu council "..." --models anthropic:claude-sonnet-5,openai:gpt-5,deepseek:deep
 
 Asks each model independently and in parallel (they don't see each other's answers), then has the lead model compare and synthesize a single recommendation. Council members get **read-only** tools only (`read_file`, `list_dir`, `glob_files`, `recall`, `list_skills`) — they can inspect your project to give an informed answer, but can't write, edit, or run anything, so asking several models at once never risks them clobbering each other's changes. This is opt-in and costs one API call per model plus one for the lead — not something you'd want as the default flow for routine tasks.
 
+### Diagnosing setup problems
+
+```bash
+mazu doctor          # checks Python/git, which provider keys are set, project readiness
+mazu doctor --live   # also makes one minimal real API call per configured key to confirm it actually works
+```
+
+Useful when `mazu chat`/`mazu run` fails and it's not obvious why — `mazu doctor --live` will tell you, for example, if a key is set but has been revoked (a plain "not set" check can't catch that, only an actual API call can).
+
 ## Model naming
 
 Models are named `provider:model` — e.g. `anthropic:claude-sonnet-5`, `openai:gpt-5`, `deepseek:deepseek-chat`, `deepseek:deepseek-reasoner`. A bare name with no prefix (`MAZU_MODEL=claude-opus-4-8`) is assumed to be Anthropic.

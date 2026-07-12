@@ -87,6 +87,46 @@ def test_usage_shows_logged_spend(tmp_path, monkeypatch):
     assert "0.0121" in result.output  # total = 0.0105 + 0.0016
 
 
+def test_doctor_reports_problems(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["doctor"])
+
+    assert result.exit_code == 0
+    assert "[FAIL]" in result.output
+    assert "problem(s) found" in result.output
+
+
+def test_doctor_all_good_with_key_set(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-fake")
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".gitignore").write_text(".mazu/\n", encoding="utf-8")
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["doctor"])
+
+    assert result.exit_code == 0
+    assert "[FAIL]" not in result.output
+
+
+def test_doctor_live_flag_does_not_crash_without_keys(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["doctor", "--live"])
+
+    assert result.exit_code == 0
+    assert "(live)" not in result.output  # nothing to live-check with no keys set
+
+
 def test_usage_since_days_filters(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     store = UsageStore(_usage_db_path())

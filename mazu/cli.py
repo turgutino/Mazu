@@ -11,6 +11,7 @@ from mazu.agent.loop import run_chat_loop
 from mazu.banner import print_banner
 from mazu.checkpoint.manager import CheckpointManager
 from mazu.config import ensure_api_key
+from mazu.diagnostics import run_diagnostics
 from mazu.memory.store import MemoryStore
 from mazu.skills.manager import SkillManager
 from mazu.tools.fs import make_fs_tools
@@ -105,6 +106,37 @@ def init() -> None:
         click.echo(f"Initialized Mazu project memory at {mazu_dir}")
     if not was_git_repo:
         click.echo("Initialized a git repository (needed for checkpoints).")
+
+
+_STATUS_MARK = {"ok": "[OK]  ", "warn": "[WARN]", "fail": "[FAIL]"}
+
+
+@main.command()
+@click.option(
+    "--live",
+    is_flag=True,
+    default=False,
+    help="Also make one minimal real API call per configured provider to confirm the "
+    "key actually authenticates (costs a fraction of a cent per provider checked).",
+)
+def doctor(live: bool) -> None:
+    """Diagnose common setup problems: Python/git availability, which provider keys
+    are configured, and whether the current directory is ready for `mazu run`."""
+    root = Path.cwd()
+    results = run_diagnostics(root, live=live)
+
+    for r in results:
+        click.echo(f"{_STATUS_MARK[r.status]} {r.name}: {r.message}")
+
+    fail_count = sum(1 for r in results if r.status == "fail")
+    warn_count = sum(1 for r in results if r.status == "warn")
+    click.echo()
+    if fail_count:
+        click.echo(f"{fail_count} problem(s) found that will likely block mazu from working.")
+    elif warn_count:
+        click.echo(f"No blocking problems, but {warn_count} thing(s) worth a look.")
+    else:
+        click.echo("Everything looks good.")
 
 
 @main.command()
