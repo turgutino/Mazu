@@ -12,7 +12,8 @@ from mazu.banner import print_banner
 from mazu.checkpoint.manager import CheckpointManager
 from mazu.config import ensure_api_key
 from mazu.diagnostics import run_diagnostics
-from mazu.memory.store import MemoryStore
+from mazu.memory.consolidate import apply_consolidation, find_duplicate_clusters
+from mazu.memory.store import FUZZY_DUPLICATE_THRESHOLD, MemoryStore
 from mazu.skills.manager import SkillManager
 from mazu.tools.fs import make_fs_tools
 from mazu.tools.memory_tools import make_memory_tools
@@ -449,6 +450,63 @@ def memory_forget(memory_id: int, use_global: bool) -> None:
         click.echo(f"Forgot memory {memory_id}.")
     else:
         click.echo(f"No memory with id {memory_id}.")
+
+
+@memory.command("consolidate")
+@click.option(
+    "--threshold",
+    default=FUZZY_DUPLICATE_THRESHOLD,
+    show_default=True,
+    type=float,
+    help="Similarity threshold (0-1) for treating two memories as duplicates of "
+    "each other. Same scale as remember's own fuzzy dedup check.",
+)
+@click.option(
+    "--global",
+    "use_global",
+    is_flag=True,
+    default=False,
+    help="Consolidate the global store instead of this project's.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Show what would be merged without actually changing anything.",
+)
+def memory_consolidate(threshold: float, use_global: bool, dry_run: bool) -> None:
+    """Find near-duplicate memories (only within the same category) and merge each
+    group down to its newest entry, marking the rest as superseded. Nothing is
+    deleted -- superseded memories stay in the database, just excluded from
+    context injection and mazu memory list. Entirely local; no API calls."""
+    db_path = _global_memory_db_path() if use_global else _memory_db_path(Path.cwd())
+    store = MemoryStore(db_path)
+    clusters = find_duplicate_clusters(store, threshold=threshold)
+
+    if not clusters:
+        click.echo("No near-duplicate memories found.")
+        store.close()
+        return
+
+    if dry_run:
+        click.echo(f"Would merge {len(clusters)} group(s) of near-duplicates:\n")
+        for cluster in clusters:
+            newest = max(cluster, key=lambda r: r["created_at"])
+            others = [r for r in cluster if r["id"] != newest["id"]]
+            click.echo(f"  Keep [{newest['id']}] {newest['title']} ({newest['category']})")
+            for o in others:
+                click.echo(f"    ← merges [{o['id']}] {o['title']}")
+        click.echo("\n(dry run — nothing changed; re-run without --dry-run to apply)")
+        store.close()
+        return
+
+    summary = apply_consolidation(store, clusters)
+    store.close()
+    click.echo(f"Merged {len(summary)} group(s) of near-duplicates:\n")
+    for entry in summary:
+        click.echo(f"  Kept [{entry['survivor_id']}] {entry['survivor_title']} ({entry['category']})")
+        for s in entry["superseded"]:
+            click.echo(f"    ← merged [{s['id']}] {s['title']}")
 
 
 @main.group()

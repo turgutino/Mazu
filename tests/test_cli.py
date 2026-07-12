@@ -10,7 +10,8 @@ import pytest
 from click.testing import CliRunner
 
 import mazu
-from mazu.cli import _usage_db_path, main
+from mazu.cli import _memory_db_path, _usage_db_path, main
+from mazu.memory.store import MemoryStore
 from mazu.usage.store import UsageStore
 
 
@@ -143,3 +144,78 @@ def test_usage_since_days_filters(tmp_path, monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert "No usage recorded yet." in result.output  # the only row is far outside the window
+
+
+def test_memory_consolidate_no_duplicates(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = MemoryStore(_memory_db_path(tmp_path))
+    store.add(category="decision", title="Use PostgreSQL", body="For concurrency")
+    store.close()
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["memory", "consolidate"])
+
+    assert result.exit_code == 0
+    assert "No near-duplicate memories found." in result.output
+
+
+def test_memory_consolidate_dry_run_does_not_modify(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = MemoryStore(_memory_db_path(tmp_path))
+    store.add(category="decision", title="Use PostgreSQL", body="For concurrency and JSON")
+    store.add(
+        category="decision", title="PostgreSQL for storage", body="For concurrency and JSON"
+    )
+    store.close()
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["memory", "consolidate", "--dry-run"])
+
+    assert result.exit_code == 0
+    assert "Would merge 1 group" in result.output
+    assert "dry run" in result.output
+
+    store = MemoryStore(_memory_db_path(tmp_path))
+    assert len(store.all_active()) == 2  # nothing actually changed
+    store.close()
+
+
+def test_memory_consolidate_applies_merge(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = MemoryStore(_memory_db_path(tmp_path))
+    store.add(category="decision", title="Use PostgreSQL", body="For concurrency and JSON")
+    store.add(
+        category="decision", title="PostgreSQL for storage", body="For concurrency and JSON"
+    )
+    store.close()
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["memory", "consolidate"])
+
+    assert result.exit_code == 0
+    assert "Merged 1 group" in result.output
+
+    store = MemoryStore(_memory_db_path(tmp_path))
+    assert len(store.all_active()) == 1
+    store.close()
+
+
+def test_memory_consolidate_global_flag_uses_global_store(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)  # HOME already redirected here by _git_identity fixture
+    from mazu.cli import _global_memory_db_path
+
+    store = MemoryStore(_global_memory_db_path())
+    store.add(category="user_preference", title="Name", body="Turgut")
+    store.add(category="user_preference", title="User's name", body="Turgut")
+    store.close()
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["memory", "consolidate", "--global"])
+
+    assert result.exit_code == 0
+    assert "Merged 1 group" in result.output
+
+    # The project-local store (empty, untouched) proves --global routed correctly.
+    project_store = MemoryStore(_memory_db_path(tmp_path))
+    assert project_store.all_active() == []
+    project_store.close()
