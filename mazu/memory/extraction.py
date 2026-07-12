@@ -8,6 +8,7 @@ CHEAP_MODEL_BY_PROVIDER = {
     "anthropic": "anthropic:claude-haiku-4-5",
     "openai": "openai:gpt-5-mini",
     "deepseek": "deepseek:deepseek-chat",
+    "gemini": "gemini:gemini-2.0-flash",
 }
 
 EXTRACTION_SYSTEM = "You extract durable, reusable memories from coding session transcripts."

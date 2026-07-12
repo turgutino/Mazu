@@ -1,6 +1,6 @@
 # Mazu
 
-**A memory-augmented, checkpointable coding agent CLI.** Open source, runs entirely on your own machine, works with Anthropic, OpenAI, or DeepSeek.
+**A memory-augmented, checkpointable coding agent CLI.** Open source, runs entirely on your own machine, works with Anthropic, OpenAI, DeepSeek, or Gemini.
 
 Most coding agents forget everything the moment the session ends. Mazu doesn't. It keeps a real, queryable memory of your project — decisions, conventions, mistakes — that persists across sessions and gets surfaced automatically. And because every autonomous step is checkpointed (code + memory + conversation, together), you can let it run longer and less-supervised without losing the ability to undo it.
 
@@ -21,7 +21,7 @@ Compared to typical coding-agent CLIs, which reset context every session and rel
 2. **A separate, global memory for *you*, not the project.** Personal facts — your name, preferred language, experience level, working style — live in `~/.mazu/global_memory.db` and follow you into every project, instead of being repeated (or lost) per-repo.
 3. **Checkpointable autonomy.** Every step of an autonomous run snapshots code (via git), the memory database, and the live conversation together. Roll back any one of them and you roll back all three, consistently — "undo" for an agent's actions, not just its files.
 4. **A self-growing local skill library.** When the agent solves something reusable, it can save it as a plain Python function. Next time a similar task comes up, it can run the skill directly — skipping the model call entirely.
-5. **Provider-agnostic.** Anthropic, OpenAI, and DeepSeek are all first-class, behind one thin adapter interface. Mazu auto-detects which one to use from whichever API key is actually set in your environment — no provider is required over another.
+5. **Provider-agnostic.** Anthropic, OpenAI, DeepSeek, and Gemini are all first-class, behind one thin adapter interface. Mazu auto-detects which one to use from whichever API key is actually set in your environment — no provider is required over another.
 6. **Council mode.** For a decision worth a second opinion, ask two or three different models the same question in parallel and have a lead model synthesize a final recommendation — opt-in, since it costs more than a single call.
 
 Everything above (agent loop, tool execution, memory database, skill library, checkpoints) runs locally. The only network traffic is your chosen model's API call, plus one cheap end-of-session call (on the same provider) to extract memories from the transcript. Nothing else leaves your machine, and there is no server run by this project.
@@ -36,6 +36,9 @@ pip install mazu
 # Only needed for openai:* or deepseek:* models (DeepSeek's API is OpenAI-compatible,
 # so it reuses the same client library under a different base URL):
 pip install "mazu[openai]"
+
+# Only needed for gemini:* models:
+pip install "mazu[gemini]"
 ```
 
 To work on Mazu itself instead, install it from source in editable mode:
@@ -52,6 +55,7 @@ Then set at least one API key — Mazu picks whichever provider is present autom
 export ANTHROPIC_API_KEY=sk-ant-...     # or store it in ~/.mazu/config.toml
 export DEEPSEEK_API_KEY=sk-...
 export OPENAI_API_KEY=sk-...
+export GEMINI_API_KEY=...
 ```
 
 On Windows (PowerShell): `$env:ANTHROPIC_API_KEY = "sk-ant-..."`
@@ -194,7 +198,7 @@ Useful when `mazu chat`/`mazu run` fails and it's not obvious why — `mazu doct
 
 ## Model naming
 
-Models are named `provider:model` — e.g. `anthropic:claude-sonnet-5`, `openai:gpt-5`, `deepseek:deepseek-chat`, `deepseek:deepseek-reasoner`. A bare name with no prefix (`MAZU_MODEL=claude-opus-4-8`) is assumed to be Anthropic.
+Models are named `provider:model` — e.g. `anthropic:claude-sonnet-5`, `openai:gpt-5`, `deepseek:deepseek-chat`, `deepseek:deepseek-reasoner`, `gemini:gemini-2.0-flash`. A bare name with no prefix (`MAZU_MODEL=claude-opus-4-8`) is assumed to be Anthropic.
 
 Resolution order when you don't pass `--model`:
 1. `MAZU_MODEL` environment variable, if set.
@@ -216,7 +220,7 @@ mazu/
 │   └── prompts.py      the system prompt itself
 ├── llm/
 │   ├── client.py        single run_turn()/run_forced_tool() seam every provider call goes through
-│   ├── providers/       Anthropic, OpenAI, DeepSeek adapters behind a common interface
+│   ├── providers/       Anthropic, OpenAI, DeepSeek, Gemini adapters behind a common interface
 │   ├── errors.py        normalized error hierarchy (rate limit, auth, transient, context-length)
 │   └── pricing.py        rough per-model cost estimates for --max-cost
 ├── memory/
@@ -243,16 +247,16 @@ The project-scoped memory database lives at `.mazu/memory.db` (created by `mazu 
 
 ## Status & roadmap
 
-Milestones M1–M4 (bare tool loop, persistent memory, checkpoint/rollback, supervised autonomy) all have a working implementation, plus multi-provider support, council mode, real-time streaming (`mazu chat`), and automatic context compaction (`mazu run`) on top. This has been exercised through live testing against real Anthropic, OpenAI, and DeepSeek API keys — chat/run tool use, memory recall (project and global), skill save/run, checkpoint/rollback (including pruning and skill restoration), memory supersede, and parallel council queries have all been verified working end-to-end. A test suite covers the core logic (memory dedup/supersede, BM25 ranking, checkpoint snapshot/restore, provider routing, streaming response parsing, context-compaction correctness) with zero API cost, running on every push via GitHub Actions across Python 3.11–3.13 on Linux/Windows/macOS.
+Milestones M1–M4 (bare tool loop, persistent memory, checkpoint/rollback, supervised autonomy) all have a working implementation, plus multi-provider support (Anthropic, OpenAI, DeepSeek, Gemini), council mode, real-time streaming (`mazu chat`), automatic context compaction (`mazu run`), a setup diagnostic (`mazu doctor`), and memory deduplication (`mazu memory consolidate`) on top. This has been exercised through live testing against real Anthropic, OpenAI, and DeepSeek API keys — chat/run tool use, memory recall (project and global), skill save/run, checkpoint/rollback (including pruning and skill restoration), memory supersede, and parallel council queries have all been verified working end-to-end. A test suite covers the core logic (memory dedup/supersede, BM25 ranking, checkpoint snapshot/restore, provider routing, streaming response parsing, context-compaction correctness, Gemini's message/tool-call conversion) with zero API cost, running on every push via GitHub Actions across Python 3.11–3.13 on Linux/Windows/macOS.
 
 **Known gaps, honestly listed:**
 - No semantic/embedding-based memory retrieval yet — BM25 is a solid, zero-cost baseline, but pure keyword ranking can miss a relevant memory that's phrased very differently from the current task.
 - Checkpoint/rollback is linear (like `git reset --hard`), not a branching tree.
-- Streaming is `mazu chat`-only for now — `mazu run` and `mazu council` still return complete responses, not token-by-token (streaming plus mid-stream confirmation prompts, or interleaved parallel council output, are separate design questions).
+- Streaming is `mazu chat`-only for now — `mazu run` and `mazu council` still return complete responses, not token-by-token (streaming plus mid-stream confirmation prompts, or interleaved parallel council output, are separate design questions). Gemini specifically doesn't stream at all yet even in `mazu chat` (falls back to a complete response) — its chunk-level behavior for function calls needs to be verified against the live API before building real streaming for it.
 - Context compaction is `mazu run`-only for now, for the same reason.
 - Live testing so far has been on Windows; Mac/Linux should work (nothing OS-specific in the design, and CI now runs the test suite on all three) but hasn't been verified against a real provider outside of CI's mocked tests.
-- No `mazu memory consolidate` command yet for manually merging/cleaning up accumulated memories.
-- No Google Gemini provider yet — the adapter interface is designed to make this a small addition, not a redesign.
+- Gemini's request/response handling is live-verified for authentication and error classification (a real request reached the API and a real 429 was correctly classified), but not yet for a full successful generation — the API key used for testing had zero free-tier quota available. Treat the Gemini provider as implemented-and-reviewed rather than fully live-proven until that's confirmed.
+- `mazu memory consolidate` uses a "keep the newest" heuristic when merging duplicates, which isn't always the most complete entry — always check `--dry-run` output before applying.
 
 Contributions and issue reports are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
 

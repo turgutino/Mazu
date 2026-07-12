@@ -3,6 +3,7 @@ from typing import Callable
 
 from mazu.llm.providers.anthropic_provider import AnthropicProvider
 from mazu.llm.providers.deepseek_provider import DeepSeekProvider
+from mazu.llm.providers.gemini_provider import GeminiProvider
 from mazu.llm.providers.openai_provider import OpenAIProvider
 from mazu.llm.retry import with_retry
 from mazu.llm.types import AgentResponse
@@ -11,16 +12,19 @@ _PROVIDERS = {
     "anthropic": AnthropicProvider(),
     "openai": OpenAIProvider(),
     "deepseek": DeepSeekProvider(),
+    "gemini": GeminiProvider(),
 }
 
 # Tie-breaker order only — used when nothing is configured and we have to guess among
 # multiple keys that happen to be set. Not a requirement to have any specific one.
-_PROVIDER_PRIORITY = ["anthropic", "openai", "deepseek"]
+# Gemini appended at the end so it never changes default resolution for existing setups.
+_PROVIDER_PRIORITY = ["anthropic", "openai", "deepseek", "gemini"]
 
 _PROVIDER_DEFAULT_MODELS = {
     "anthropic": "anthropic:claude-sonnet-5",
     "openai": "openai:gpt-5",
     "deepseek": "deepseek:deepseek-chat",
+    "gemini": "gemini:gemini-2.0-flash",
 }
 
 

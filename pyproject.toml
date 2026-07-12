@@ -40,6 +40,7 @@ dependencies = [
 
 [project.optional-dependencies]
 openai = ["openai>=1.0"]
+gemini = ["google-genai>=1.0"]
 dev = ["pytest>=8.0"]
 
 [project.urls]

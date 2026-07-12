@@ -16,8 +16,8 @@ def test_split_model_bare_name_assumes_anthropic():
     assert _split_model("claude-opus-4-8") == ("anthropic", "claude-opus-4-8")
 
 
-def test_all_three_providers_registered():
-    assert set(_PROVIDERS) == {"anthropic", "openai", "deepseek"}
+def test_all_four_providers_registered():
+    assert set(_PROVIDERS) == {"anthropic", "openai", "deepseek", "gemini"}
 
 
 def test_default_model_prefers_explicit_env_var(monkeypatch):
