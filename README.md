@@ -1,8 +1,6 @@
 # Mazu
 
-**A memory-augmented, checkpointable coding agent CLI.** Open source, runs entirely on your own machine, works with Anthropic, OpenAI, DeepSeek, or Gemini.
-
-Most coding agents forget everything the moment the session ends. Mazu doesn't. It keeps a real, queryable memory of your project — decisions, conventions, mistakes — that persists across sessions and gets surfaced automatically. And because every autonomous step is checkpointed (code + memory + conversation, together), you can let it run longer and less-supervised without losing the ability to undo it.
+**Mazu is a local memory and checkpoint layer for coding agents.**
 
 ```
   ███╗   ███╗
@@ -13,13 +11,19 @@ Most coding agents forget everything the moment the session ends. Mazu doesn't. 
   ╚═╝     ╚═╝
 ```
 
-## What makes Mazu different
+## What is Mazu?
 
-Compared to typical coding-agent CLIs, which reset context every session and rely on a static instructions file:
+A CLI coding agent (chat with it, or let it run autonomously) that keeps a real, queryable memory of your project across sessions, and checkpoints its code + memory + conversation together at every step so any point can be rolled back to. Open source, runs entirely on your own machine, works with Anthropic, OpenAI, DeepSeek, or Gemini.
+
+## Why not Cursor / Claude Code?
+
+Mazu isn't trying to replace them, and it isn't an IDE. The goal is narrower and more specific: **manage an agent's memory, its steps, and its ability to undo them** — not write more code faster. If you want a polished in-editor experience with a large tool ecosystem, use Cursor or Claude Code. If you've felt the specific pain of an agent forgetting a project decision it already made last week, or of not trusting a multi-step autonomous run because you can't see what it actually did or easily undo it, that's the gap Mazu fills. It's a complement to those tools' workflow, not a competitor to their editor.
+
+## Core idea: memory + checkpoints
 
 1. **Persistent structured memory.** Decisions, conventions, and mistakes made on a project are written to a local SQLite database, ranked by local BM25 (zero API cost — no embedding calls) against your current task, and automatically injected back into context. You never have to re-explain "we use Postgres, not SQLite" in every new session. Optional semantic search (see below) recovers matches BM25's keyword-only ranking would miss entirely.
 2. **A separate, global memory for *you*, not the project.** Personal facts — your name, preferred language, experience level, working style — live in `~/.mazu/global_memory.db` and follow you into every project, instead of being repeated (or lost) per-repo.
-3. **Checkpointable autonomy.** Every step of an autonomous run snapshots code (via git), the memory database, and the live conversation together. Roll back any one of them and you roll back all three, consistently — "undo" for an agent's actions, not just its files.
+3. **Checkpointable autonomy.** Every step of an autonomous run snapshots code (via git), the memory database, and the live conversation together. Roll back any one of them and you roll back all three, consistently — "undo" for an agent's actions, not just its files. `mazu timeline` / `checkpoint show` / `checkpoint diff` make that history inspectable, not just a black box you either trust or roll back blind.
 4. **A self-growing local skill library.** When the agent solves something reusable, it can save it as a plain Python function. Next time a similar task comes up, it can run the skill directly — skipping the model call entirely.
 5. **Provider-agnostic.** Anthropic, OpenAI, DeepSeek, and Gemini are all first-class, behind one thin adapter interface. Mazu auto-detects which one to use from whichever API key is actually set in your environment — no provider is required over another.
 6. **Council mode.** For a decision worth a second opinion, ask two or three different models the same question in parallel and have a lead model synthesize a final recommendation — opt-in, since it costs more than a single call.
@@ -59,6 +63,8 @@ export GEMINI_API_KEY=...
 ```
 
 On Windows (PowerShell): `$env:ANTHROPIC_API_KEY = "sk-ant-..."`
+
+Something not working? `mazu doctor` (and `mazu doctor --live`) diagnoses the common causes — see [Diagnosing setup problems](#diagnosing-setup-problems) below.
 
 ## Quick start
 
@@ -128,16 +134,27 @@ By default, file writes/edits proceed unattended in `run` mode (checkpoints make
 
 `mazu run` refuses to start on a dirty working tree, so the first checkpoint is always a clean baseline. If it's interrupted with **Ctrl-C**, you're offered `[c]ontinue`, `[r]ollback <id>`, or `[q]uit` before anything is lost.
 
-### Cost & usage tracking
-
-Every `mazu chat`, `mazu run`, and `mazu council` call is logged (provider, model, tokens, estimated cost) to a small local store at `~/.mazu/usage.db` — global across every project, since spend is tied to your API keys, not any one codebase.
+### Checkpoints & rollback
 
 ```bash
-mazu usage                  # total estimated spend, all time, broken down by model
-mazu usage --since-days 7   # only the last 7 days
+mazu checkpoint                     # manually snapshot code + memory (outside a chat session)
+mazu checkpoint list                # flat list of all checkpoints for this project
+mazu checkpoint prune --keep 20     # drop old on-disk snapshot copies (git history is untouched)
+mazu rollback                       # restore to the most recent checkpoint
+mazu rollback cp_000003             # restore to a specific one
 ```
 
-Like `--max-cost`, this is an *estimate* from a built-in, occasionally-stale pricing table (see [`mazu/llm/pricing.py`](mazu/llm/pricing.py)) — treat it as a helpful approximation, not a substitute for your provider's own billing dashboard.
+A checkpoint bundles a git commit, a consistent copy of the memory database (taken via SQLite's online backup API, safe even mid-write), the skill library, and the conversation transcript. Restoring one restores all of them together, so code, what the agent remembers, and what it was talking about never drift out of sync with each other.
+
+To actually *see* a checkpoint's history instead of just an id list:
+
+```bash
+mazu timeline                       # every checkpoint: what changed since the previous one, memory/skills snapshot status
+mazu checkpoint show cp_000003      # one checkpoint's full detail — commit, conversation length, snapshot status
+mazu checkpoint diff cp_000003      # what's different between that checkpoint and right now (read-only, no rollback)
+```
+
+`checkpoint diff` calls out newly created files explicitly, in a separate section — `git diff` itself never lists untracked files no matter what it's compared against, so a file the agent created but never `git add`ed would otherwise silently disappear from the diff.
 
 ### Memory
 
@@ -180,28 +197,6 @@ mazu skills forget <name>           # delete one
 
 When the agent solves a reusable problem, it can save the solution as a plain Python function under `.mazu/skills/<name>/`. The next time a similar task comes up, it can call the skill directly instead of solving it again from scratch through the model — a real cost and latency win for repeated, mechanical work.
 
-### Checkpoints & rollback
-
-```bash
-mazu checkpoint                     # manually snapshot code + memory (outside a chat session)
-mazu checkpoint list                # flat list of all checkpoints for this project
-mazu checkpoint prune --keep 20     # drop old on-disk snapshot copies (git history is untouched)
-mazu rollback                       # restore to the most recent checkpoint
-mazu rollback cp_000003             # restore to a specific one
-```
-
-A checkpoint bundles a git commit, a consistent copy of the memory database (taken via SQLite's online backup API, safe even mid-write), the skill library, and the conversation transcript. Restoring one restores all of them together, so code, what the agent remembers, and what it was talking about never drift out of sync with each other.
-
-To actually *see* a checkpoint's history instead of just an id list:
-
-```bash
-mazu timeline                       # every checkpoint: what changed since the previous one, memory/skills snapshot status
-mazu checkpoint show cp_000003      # one checkpoint's full detail — commit, conversation length, snapshot status
-mazu checkpoint diff cp_000003      # what's different between that checkpoint and right now (read-only, no rollback)
-```
-
-`checkpoint diff` calls out newly created files explicitly, in a separate section — `git diff` itself never lists untracked files no matter what it's compared against, so a file the agent created but never `git add`ed would otherwise silently disappear from the diff.
-
 ### Council mode
 
 ```bash
@@ -210,6 +205,17 @@ mazu council "..." --models anthropic:claude-sonnet-5,openai:gpt-5,deepseek:deep
 ```
 
 Asks each model independently and in parallel (they don't see each other's answers), then has the lead model compare and synthesize a single recommendation. Council members get **read-only** tools only (`read_file`, `list_dir`, `glob_files`, `recall`, `list_skills`) — they can inspect your project to give an informed answer, but can't write, edit, or run anything, so asking several models at once never risks them clobbering each other's changes. This is opt-in and costs one API call per model plus one for the lead — not something you'd want as the default flow for routine tasks.
+
+### Cost & usage tracking
+
+Every `mazu chat`, `mazu run`, and `mazu council` call is logged (provider, model, tokens, estimated cost) to a small local store at `~/.mazu/usage.db` — global across every project, since spend is tied to your API keys, not any one codebase.
+
+```bash
+mazu usage                  # total estimated spend, all time, broken down by model
+mazu usage --since-days 7   # only the last 7 days
+```
+
+Like `--max-cost`, this is an *estimate* from a built-in, occasionally-stale pricing table (see [`mazu/llm/pricing.py`](mazu/llm/pricing.py)) — treat it as a helpful approximation, not a substitute for your provider's own billing dashboard.
 
 ### Diagnosing setup problems
 
@@ -231,38 +237,7 @@ Resolution order when you don't pass `--model`:
 
 A DeepSeek-only or OpenAI-only setup works with zero extra flags — Anthropic is only a tie-breaker if more than one key happens to be set, never a hard requirement.
 
-## How it fits together
-
-```
-mazu/
-├── cli.py             Click entry point — chat / run / council / memory / skills / checkpoint / rollback
-├── agent/
-│   ├── loop.py         interactive chat REPL
-│   ├── autonomous.py   unattended multi-step runner with circuit breaker + cost limit
-│   ├── council.py      parallel multi-model advisory round + lead synthesis
-│   ├── context.py      builds the system prompt from project + global memory + skills
-│   └── prompts.py      the system prompt itself
-├── llm/
-│   ├── client.py        single run_turn()/run_forced_tool() seam every provider call goes through
-│   ├── providers/       Anthropic, OpenAI, DeepSeek, Gemini adapters behind a common interface
-│   ├── errors.py        normalized error hierarchy (rate limit, auth, transient, context-length)
-│   └── pricing.py        rough per-model cost estimates for --max-cost
-├── memory/
-│   ├── store.py          SQLite-backed memory store (shared by project + global instances)
-│   ├── retrieval.py       BM25 ranking (+ optional semantic blending) + context-block rendering
-│   ├── embeddings.py      optional semantic search layer (opt-in, see below)
-│   └── extraction.py      end-of-session auto-extraction prompt
-├── checkpoint/
-│   └── manager.py         git commit + memory/skills/conversation snapshot, retention/pruning
-├── skills/
-│   └── manager.py         save/list/run local skill functions
-└── tools/                 read_file, write_file, edit_file, list_dir, glob_files, run_shell,
-                           remember, recall, save_skill, run_skill, list_skills
-```
-
-The project-scoped memory database lives at `.mazu/memory.db` (created by `mazu init`, gitignored by default). The global, cross-project store lives at `~/.mazu/global_memory.db`, outside any project entirely.
-
-## Security notes
+## Safety model
 
 - All file tools are sandboxed to the project root — paths (including through symlinks) that resolve outside it are rejected.
 - Shell commands go through a shared denylist (destructive/irreversible patterns) in **both** `mazu chat` and `mazu run`, regardless of confirmation settings.
@@ -270,18 +245,23 @@ The project-scoped memory database lives at `.mazu/memory.db` (created by `mazu 
 - `mazu run` refuses to start with uncommitted changes already present, so autonomous edits are always diffable against a clean baseline.
 - See [SECURITY.md](SECURITY.md) for the full policy and how to report a vulnerability.
 
+## Architecture
+
+The module map, the provider adapter seam, and how memory/checkpoints/skills fit together are documented separately in [ARCHITECTURE.md](ARCHITECTURE.md), so this README can stay focused on using Mazu rather than building it.
+
 ## Status & roadmap
 
-Milestones M1–M4 (bare tool loop, persistent memory, checkpoint/rollback, supervised autonomy) all have a working implementation, plus multi-provider support (Anthropic, OpenAI, DeepSeek, Gemini), council mode, real-time streaming (`mazu chat`), automatic context compaction (`mazu run`), a setup diagnostic (`mazu doctor`), memory deduplication (`mazu memory consolidate`), and optional semantic memory search on top. This has been exercised through live testing against real Anthropic, OpenAI, and DeepSeek API keys — chat/run tool use, memory recall (project and global), skill save/run, checkpoint/rollback (including pruning and skill restoration), memory supersede, and parallel council queries have all been verified working end-to-end. Semantic search specifically was verified with real embedding calls: a memory with zero shared vocabulary with the query it was retrieved by (proving the blend actually recovers what BM25 alone cannot, not just that it returns numbers). A test suite covers the core logic (memory dedup/supersede, BM25 + semantic blending, checkpoint snapshot/restore, provider routing, streaming response parsing, context-compaction correctness, Gemini's message/tool-call conversion) with zero API cost by default, running on every push via GitHub Actions across Python 3.11–3.13 on Linux/Windows/macOS.
+Milestones M1–M4 (bare tool loop, persistent memory, checkpoint/rollback, supervised autonomy) all have a working implementation, plus multi-provider support, council mode, real-time streaming (`mazu chat`), context compaction (`mazu run`), a setup diagnostic, memory deduplication, checkpoint history inspection (`mazu timeline`/`checkpoint show`/`checkpoint diff`), and optional semantic memory search. This has been exercised through live testing against real Anthropic, OpenAI, DeepSeek, and Gemini API keys, plus a test suite (210+ tests, zero API cost by default) running on every push via GitHub Actions across Python 3.11–3.13 on Linux/Windows/macOS.
 
 **Known gaps, honestly listed:**
-- Semantic search's 50/50 BM25/embedding blend weight is a fixed constant, not tuned against real usage data — may need adjusting once there's more real-world signal on how well it actually ranks.
-- Checkpoint/rollback is linear (like `git reset --hard`), not a branching tree.
-- Streaming is `mazu chat`-only for now — `mazu run` and `mazu council` still return complete responses, not token-by-token (streaming plus mid-stream confirmation prompts, or interleaved parallel council output, are separate design questions). Gemini specifically doesn't stream at all yet even in `mazu chat` (falls back to a complete response) — its chunk-level behavior for function calls needs to be verified against the live API before building real streaming for it.
-- Context compaction is `mazu run`-only for now, for the same reason.
-- Live testing so far has been on Windows; Mac/Linux should work (nothing OS-specific in the design, and CI now runs the test suite on all three) but hasn't been verified against a real provider outside of CI's mocked tests.
-- Gemini's request/response handling is live-verified for authentication and error classification (a real request reached the API and a real 429 was correctly classified), but not yet for a full successful generation — the API key used for testing had zero free-tier quota available. Treat the Gemini provider as implemented-and-reviewed rather than fully live-proven until that's confirmed.
-- `mazu memory consolidate` uses a "keep the newest" heuristic when merging duplicates, which isn't always the most complete entry — always check `--dry-run` output before applying.
+- Semantic search's 50/50 BM25/embedding blend weight is a fixed constant, not tuned against real usage data.
+- Checkpoint/rollback is linear (like `git reset --hard`), not a branching tree yet.
+- Streaming is `mazu chat`-only for now; Gemini doesn't stream at all yet (falls back to a complete response) — its chunk-level function-call behavior needs live verification first.
+- Live testing so far has been on Windows; CI runs the test suite on Linux/macOS too, but a real provider hasn't been exercised live on those platforms yet.
+- Gemini is live-verified for authentication and error classification, but not yet for a full successful generation (the test key had zero free-tier quota).
+- `mazu memory consolidate` uses a "keep the newest" heuristic, which isn't always the most complete entry — check `--dry-run` output before applying.
+
+The full build sequence — what's next, in what order, and what's deliberately not planned yet — is in [ROADMAP.md](ROADMAP.md).
 
 Contributions and issue reports are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
 

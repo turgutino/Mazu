@@ -1,7 +1,7 @@
 [project]
 name = "mazu"
-version = "0.5.0"
-description = "A memory-augmented, checkpointable coding agent CLI."
+version = "0.5.1"
+description = "A local memory and checkpoint layer for coding agents."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
