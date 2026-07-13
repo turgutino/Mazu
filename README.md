@@ -300,10 +300,30 @@ Models are named `provider:model` — e.g. `anthropic:claude-sonnet-5`, `openai:
 
 Resolution order when you don't pass `--model`:
 1. `MAZU_MODEL` environment variable, if set.
-2. Auto-detected from whichever provider's API key is actually present in your environment.
-3. A hardcoded Anthropic fallback (which just surfaces a clear "set ANTHROPIC_API_KEY" message if you truly have no key configured).
+2. `default_model` set via `mazu config set` (see below), if set.
+3. Auto-detected from whichever provider's API key is actually present in your environment.
+4. A hardcoded Anthropic fallback (which just surfaces a clear "set ANTHROPIC_API_KEY" message if you truly have no key configured).
 
 A DeepSeek-only or OpenAI-only setup works with zero extra flags — Anthropic is only a tie-breaker if more than one key happens to be set, never a hard requirement.
+
+### Persistent settings
+
+```bash
+mazu config set default_model deepseek:deepseek-chat   # skip MAZU_MODEL / --model going forward
+mazu config set anthropic_api_key sk-ant-...            # alternative to an env var, same effect
+mazu config list                                        # secrets are masked, showing only the last 4 characters
+mazu config unset default_model
+```
+
+Stored in `~/.mazu/config.toml`, outside any repo. **Environment variables always win** — a config-file value is only used if the corresponding env var (`MAZU_MODEL`, `ANTHROPIC_API_KEY`, etc.) isn't already set, exactly like the resolution order above. Known keys: `default_model`, `anthropic_api_key`, `openai_api_key`, `deepseek_api_key`, `gemini_api_key` (plus a legacy `api_key`, kept as an alias for `anthropic_api_key` for anyone with a config file from before per-provider keys existed).
+
+### Model capabilities
+
+```bash
+mazu models
+```
+
+Lists every model Mazu knows about with real (token-by-token) streaming support, tool-use support, approximate context window, and approximate pricing side by side — useful for picking a model without cross-referencing four different providers' docs. Best-effort and may go stale; see [`mazu/llm/capabilities.py`](mazu/llm/capabilities.py).
 
 ## Safety model
 
@@ -324,7 +344,7 @@ Milestones M1–M4 (bare tool loop, persistent memory, checkpoint/rollback, supe
 **Known gaps, honestly listed:**
 - Semantic search's 50/50 BM25/embedding blend weight is a fixed constant, not tuned against real usage data.
 - Checkpoint/rollback is linear (like `git reset --hard`), not a branching tree yet.
-- Streaming is `mazu chat`-only for now; Gemini doesn't stream at all yet (falls back to a complete response) — its chunk-level function-call behavior needs live verification first.
+- Streaming is `mazu chat`-only for now; Gemini doesn't stream at all yet (falls back to a complete response, correct but not incremental — see `mazu models`). Deliberately deferred: the `google-genai` SDK's docs and source don't say whether function-call parts arrive fragmented, whole, or only in the final chunk during a stream, and guessing wrong risks silently mishandling tool calls. Needs a live Gemini key with real quota to verify before implementing.
 - Live testing so far has been on Windows; CI runs the test suite on Linux/macOS too, but a real provider hasn't been exercised live on those platforms yet.
 - Gemini is live-verified for authentication and error classification, but not yet for a full successful generation (the test key had zero free-tier quota).
 - `mazu memory consolidate` uses a "keep the newest" heuristic, which isn't always the most complete entry — check `--dry-run` output before applying.

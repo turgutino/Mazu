@@ -29,7 +29,8 @@ _PROVIDER_DEFAULT_MODELS = {
 
 
 def default_model() -> str:
-    """Resolution order: explicit MAZU_MODEL env var, then auto-detect from whichever
+    """Resolution order: explicit MAZU_MODEL env var, then `default_model` set via
+    `mazu config set` (~/.mazu/config.toml), then auto-detect from whichever
     provider's API key is actually present in the environment, then a hardcoded
     Anthropic fallback (which will simply surface a clear "set ANTHROPIC_API_KEY" error
     via config.ensure_api_key if the user genuinely has no key configured at all).
@@ -38,6 +39,13 @@ def default_model() -> str:
     """
     if os.environ.get("MAZU_MODEL"):
         return os.environ["MAZU_MODEL"]
+
+    from mazu.config import get_default_model
+
+    configured = get_default_model()
+    if configured:
+        return configured
+
     for provider_name in _PROVIDER_PRIORITY:
         if os.environ.get(_PROVIDERS[provider_name].api_key_env):
             return _PROVIDER_DEFAULT_MODELS[provider_name]

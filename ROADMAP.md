@@ -46,10 +46,10 @@ This file is split into two parts on purpose:
 - [x] `mazu run --resume <run_id>` (adapted from `mazu run resume <run_id>` — Click's Group/positional-argument handling makes a `resume` subcommand ambiguous against a free-text TASK argument; a flag on the existing `run` command is unambiguous and equally discoverable via `--help`). Resumes from the run's last checkpoint, reusing its original task/model/options exactly
 - [x] Structured end-of-run report: files changed, checkpoints created, memories saved, tool errors — printed at the end of every `mazu run` (fresh or resumed), computed from `ActionLogStore`/`RunStore` rather than duplicated bookkeeping
 
-### Phase G — Provider Layer
-- [ ] Model capability table (streaming support, tool support, context window, approximate cost) surfaced somewhere inspectable (`mazu doctor` or a new command)
-- [ ] `mazu config set / list` for persistent settings (default model, etc.) instead of only env vars
-- [ ] Real streaming for Gemini once its chunk-level function-call behavior is verified against the live API (see README's known gaps)
+### Phase G — Provider Layer ✅ done (2/3 — see note)
+- [x] Model capability table (streaming support, tool support, context window, approximate cost) — new `mazu models` command, backed by `mazu/llm/capabilities.py`
+- [x] `mazu config set / list / unset` for persistent settings (default model, per-provider API keys) — `~/.mazu/config.toml`, generalized from the old Anthropic-only `api_key` field; env vars still always win
+- [ ] Real streaming for Gemini — **deliberately deferred**, not implemented. The `google-genai` SDK's `generate_content_stream` docs/source don't confirm whether `function_call` parts arrive fragmented, whole, or only in the final chunk during a stream (unlike Anthropic's `stream()`/`get_final_message()` pattern or OpenAI's well-documented delta-accumulation, both already verified and implemented). Guessing wrong risks silently mishandling tool calls for every Gemini user. Needs a live Gemini key with real quota (the one used earlier in this project had zero free-tier quota) to verify chunk behavior before implementing — revisit then.
 
 ### Phase H — Install & Onboarding
 - [ ] `mazu doctor --fix` — auto-fix what it can (missing `.gitignore` entry, offer to run `mazu init`)

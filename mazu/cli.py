@@ -11,8 +11,16 @@ from mazu.agent.council import run_council
 from mazu.agent.loop import run_chat_loop
 from mazu.banner import print_banner
 from mazu.checkpoint.manager import CheckpointManager
-from mazu.config import ensure_api_key
+from mazu.config import (
+    _SECRET_CONFIG_KEYS,
+    config_path,
+    ensure_api_key,
+    list_config,
+    set_config_value,
+    unset_config_value,
+)
 from mazu.diagnostics import run_diagnostics
+from mazu.llm.capabilities import list_capabilities
 from mazu.memory.consolidate import apply_consolidation, find_duplicate_clusters
 from mazu.memory.retrieval import explain_retrieval
 from mazu.memory.store import FUZZY_DUPLICATE_THRESHOLD, MemoryStore
@@ -162,6 +170,72 @@ def doctor(live: bool) -> None:
         click.echo(f"No blocking problems, but {warn_count} thing(s) worth a look.")
     else:
         click.echo("Everything looks good.")
+
+
+@main.command("models")
+def models_cmd() -> None:
+    """Show what Mazu knows about each provider/model: real streaming support, tool
+    use, context window, and approximate pricing. Best-effort and may go stale --
+    verify against your provider's own docs before relying on it for capacity planning."""
+    rows = list_capabilities()
+    click.echo(f"{'MODEL':<32} {'STREAM':<7} {'TOOLS':<6} {'CONTEXT':<10} {'$/1M IN':<9} {'$/1M OUT'}")
+    for r in rows:
+        key = f"{r.provider}:{r.model}"
+        stream = "yes" if r.streaming else "no"
+        tools = "yes" if r.tool_use else "no"
+        ctx = f"{r.context_window:,}" if r.context_window is not None else "?"
+        price_in = f"${r.input_price_per_million:.2f}" if r.input_price_per_million is not None else "?"
+        price_out = f"${r.output_price_per_million:.2f}" if r.output_price_per_million is not None else "?"
+        click.echo(f"{key:<32} {stream:<7} {tools:<6} {ctx:<10} {price_in:<9} {price_out}")
+    click.echo(
+        "\nContext windows and pricing are best-effort (see mazu/llm/capabilities.py, "
+        "mazu/llm/pricing.py) and may be stale -- treat as approximate."
+    )
+
+
+def _mask_secret(value: str) -> str:
+    if len(value) <= 4:
+        return "*" * len(value)
+    return "*" * (len(value) - 4) + value[-4:]
+
+
+@main.group("config")
+def config_group() -> None:
+    """Manage persistent settings (~/.mazu/config.toml): default model, per-provider
+    API keys. Env vars always take priority over anything set here."""
+
+
+@config_group.command("list")
+def config_list() -> None:
+    """Show every config value currently set. API keys are masked."""
+    values = list_config()
+    if not values:
+        click.echo(f"No config set. ({config_path()} doesn't exist or is empty.)")
+        return
+    for key, value in sorted(values.items()):
+        display = _mask_secret(value) if key in _SECRET_CONFIG_KEYS else value
+        click.echo(f"{key} = {display}")
+
+
+@config_group.command("set")
+@click.argument("key")
+@click.argument("value")
+def config_set(key: str, value: str) -> None:
+    """Set a config value, e.g. `mazu config set default_model anthropic:claude-opus-4-8`."""
+    try:
+        set_config_value(key, value)
+    except ValueError as e:
+        raise click.UsageError(str(e))
+    display = _mask_secret(value) if key in _SECRET_CONFIG_KEYS else value
+    click.echo(f"Set {key} = {display}")
+
+
+@config_group.command("unset")
+@click.argument("key")
+def config_unset(key: str) -> None:
+    """Remove a config value."""
+    ok = unset_config_value(key)
+    click.echo(f"Unset {key}." if ok else f"{key} was not set.")
 
 
 @main.command()

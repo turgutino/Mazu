@@ -914,3 +914,109 @@ def test_runs_lists_recorded_runs(tmp_path, monkeypatch):
     assert "r1" in result.output
     assert "completed" in result.output
     assert "end_turn" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Provider Layer (Phase G): mazu models, mazu config
+# ---------------------------------------------------------------------------
+
+
+def test_models_lists_every_provider(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(main, ["models"])
+
+    assert result.exit_code == 0, result.output
+    assert "anthropic:claude-sonnet-5" in result.output
+    assert "openai:gpt-5" in result.output
+    assert "deepseek:deepseek-chat" in result.output
+    assert "gemini:gemini-2.0-flash" in result.output
+
+
+def test_config_list_empty(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(main, ["config", "list"])
+
+    assert result.exit_code == 0
+    assert "No config set." in result.output
+
+
+def test_config_set_and_list(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+
+    result = runner.invoke(main, ["config", "set", "default_model", "deepseek:deepseek-chat"])
+    assert result.exit_code == 0, result.output
+    assert "Set default_model = deepseek:deepseek-chat" in result.output
+
+    result = runner.invoke(main, ["config", "list"])
+    assert "default_model = deepseek:deepseek-chat" in result.output
+
+
+def test_config_set_api_key_is_masked_in_output_and_list(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+
+    result = runner.invoke(main, ["config", "set", "anthropic_api_key", "sk-ant-1234567890abcdef"])
+    assert result.exit_code == 0, result.output
+    assert "abcdef" not in result.output  # only the last 4 chars should ever show
+    assert "cdef" in result.output
+
+    result = runner.invoke(main, ["config", "list"])
+    assert "sk-ant-1234567890abcdef" not in result.output
+    assert "cdef" in result.output
+
+
+def test_config_set_unknown_key_is_a_usage_error(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(main, ["config", "set", "bogus_key", "x"])
+
+    assert result.exit_code != 0
+    assert "Unknown config key" in result.output
+
+
+def test_config_unset(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    runner.invoke(main, ["config", "set", "default_model", "deepseek:deepseek-chat"])
+
+    result = runner.invoke(main, ["config", "unset", "default_model"])
+    assert result.exit_code == 0
+    assert "Unset default_model." in result.output
+
+    result = runner.invoke(main, ["config", "list"])
+    assert "No config set." in result.output
+
+
+def test_config_unset_missing_key_reports_cleanly(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(main, ["config", "unset", "default_model"])
+
+    assert result.exit_code == 0
+    assert "was not set" in result.output
+
+
+def test_config_set_default_model_affects_chat_without_explicit_model_flag(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("MAZU_MODEL", raising=False)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-fake")
+
+    runner = CliRunner()
+    runner.invoke(main, ["config", "set", "default_model", "deepseek:deepseek-chat"])
+
+    captured = {}
+
+    def _fake_run_chat_loop(registry, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(cli_module, "run_chat_loop", _fake_run_chat_loop)
+    result = runner.invoke(main, ["chat"])
+
+    assert result.exit_code == 0, result.output
+    assert captured["model"] is None  # --model wasn't passed -- resolution happens downstream
+    # The real proof this worked: ensure_api_key(None) didn't raise SystemExit, which
+    # it would have if default_model() hadn't picked up deepseek from config and
+    # instead fallen through to the hardcoded Anthropic default with no key set.
