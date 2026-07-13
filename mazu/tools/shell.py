@@ -14,23 +14,52 @@ _SHELL_LABEL = "Windows cmd.exe" if platform.system() == "Windows" else "a POSIX
 # file damage, not irreversible external actions (force-pushes, key exfiltration,
 # disk wipes). Shared between chat mode (loop.py) and autonomous mode
 # (autonomous.py) so a reflexive "y" in chat isn't the only thing standing between
-# the model and one of these.
-SHELL_DENYLIST = [
-    re.compile(r"rm\s+-rf\s+/(\s|$)", re.IGNORECASE),
-    re.compile(r"git\s+push\b.*--force", re.IGNORECASE),
-    re.compile(r"\.ssh(/|\\)", re.IGNORECASE),
-    re.compile(r"\bsudo\b", re.IGNORECASE),
-    re.compile(r"\bformat\s+[a-z]:", re.IGNORECASE),
+# the model and one of these. Each entry pairs its pattern with a short, human-
+# readable reason so a block message can say *why*, not just "denylist matched" --
+# a model (and a user reading the transcript) can act on "elevates privileges via
+# sudo" in a way it can't act on an opaque regex match.
+SHELL_DENYLIST: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"rm\s+-rf\s+/(\s|$)", re.IGNORECASE), "recursively deletes the filesystem root"),
+    (re.compile(r"git\s+push\b.*--force", re.IGNORECASE), "force-pushes, which can overwrite others' history"),
+    (re.compile(r"\.ssh(/|\\)", re.IGNORECASE), "touches your SSH credentials directory"),
+    (re.compile(r"\bsudo\b", re.IGNORECASE), "elevates privileges via sudo"),
+    (re.compile(r"\bformat\s+[a-z]:", re.IGNORECASE), "formats a drive"),
 ]
 
 
+def denylist_reason(command: str) -> str | None:
+    """Returns a human-readable reason the command is blocked, or None if it isn't
+    denylisted. The first matching rule wins if more than one pattern matches."""
+    for pattern, reason in SHELL_DENYLIST:
+        if pattern.search(command):
+            return reason
+    return None
+
+
 def is_denied_shell_command(command: str) -> bool:
-    return any(pattern.search(command) for pattern in SHELL_DENYLIST)
+    return denylist_reason(command) is not None
 
 
-def make_shell_tool(root: Path, timeout: int = 60) -> Tool:
+def is_allowed_by_shell_allowlist(command: str, allowlist: list[str] | None) -> bool:
+    """An allowlist is opt-in and additive to the denylist above, not a replacement
+    for it -- the denylist backstop always applies regardless of allowlist state. With
+    no allowlist configured (the default), every non-denylisted command is allowed,
+    unchanged from before this existed. When an allowlist IS configured, a command is
+    only allowed if it starts with one of the allowed program names as a whole word
+    (e.g. allowlist=["git"] permits "git status" but not "gitx status" or a command
+    that merely mentions "git" later, like "echo git").
+    """
+    if not allowlist:
+        return True
+    stripped = command.strip()
+    return any(re.match(rf"{re.escape(name)}\b", stripped) is not None for name in allowlist)
+
+
+def make_shell_tool(root: Path, timeout: int = 60, dry_run: bool = False) -> Tool:
     def run_shell(input: dict) -> ToolResult:
         command = input["command"]
+        if dry_run:
+            return ToolResult(f"[dry-run] Would run: {command}")
         try:
             proc = subprocess.run(
                 command,

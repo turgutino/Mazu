@@ -77,16 +77,24 @@ def _build_registry(
     global_memory_store: MemoryStore,
     skill_manager: SkillManager,
     session_id: str,
+    dry_run: bool = False,
 ) -> ToolRegistry:
     registry = ToolRegistry()
-    for tool in make_fs_tools(root):
+    for tool in make_fs_tools(root, dry_run=dry_run):
         registry.register(tool)
-    registry.register(make_shell_tool(root))
+    registry.register(make_shell_tool(root, dry_run=dry_run))
     for tool in make_memory_tools(memory_store, global_memory_store, session_id):
         registry.register(tool)
     for tool in make_skill_tools(skill_manager):
         registry.register(tool)
     return registry
+
+
+def _parse_shell_allowlist(raw: str | None) -> list[str] | None:
+    if not raw:
+        return None
+    names = [name.strip() for name in raw.split(",") if name.strip()]
+    return names or None
 
 
 @click.group()
@@ -156,7 +164,15 @@ def doctor(live: bool) -> None:
     help="Override the model, e.g. 'deepseek:deepseek-chat' (default: env MAZU_MODEL, "
     "or auto-detected from whichever provider's API key is set).",
 )
-def chat(model: str | None) -> None:
+@click.option(
+    "--shell-allowlist",
+    default=None,
+    help="Comma-separated program names (e.g. 'git,npm,pytest') -- if set, shell "
+    "commands are only allowed if they start with one of these. The safety denylist "
+    "still applies on top regardless. Default: no allowlist, every non-denylisted "
+    "command is allowed (unchanged behavior).",
+)
+def chat(model: str | None, shell_allowlist: str | None) -> None:
     """Start an interactive chat session in the current directory."""
     ensure_api_key(model)
     root = Path.cwd()
@@ -182,6 +198,7 @@ def chat(model: str | None) -> None:
         model=model,
         usage_store=usage_store,
         action_log_store=action_log_store,
+        shell_allowlist=_parse_shell_allowlist(shell_allowlist),
     )
 
 
@@ -210,6 +227,23 @@ def chat(model: str | None) -> None:
     help="Stop once the estimated spend (approximate, based on a built-in pricing table) "
     "reaches this many USD. Ignored with a warning if the model has no pricing data.",
 )
+@click.option(
+    "--shell-allowlist",
+    default=None,
+    help="Comma-separated program names (e.g. 'git,npm,pytest') -- if set, shell "
+    "commands are only allowed if they start with one of these. The safety denylist "
+    "still applies on top regardless. Default: no allowlist, every non-denylisted "
+    "command is allowed (unchanged behavior).",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Show what the task would do -- which files would be written/edited and which "
+    "shell commands would run -- without touching disk, executing anything, or creating "
+    "checkpoints. Read-only tools (read_file, list_dir, glob_files, recall) still run for "
+    "real so the model can gather real information while planning.",
+)
 @click.option("--model", default=None, help="Override the model.")
 def run(
     task: str,
@@ -218,6 +252,8 @@ def run(
     allow_shell: bool,
     keep_checkpoints: int | None,
     max_cost: float | None,
+    shell_allowlist: str | None,
+    dry_run: bool,
     model: str | None,
 ) -> None:
     """Run a task autonomously (multi-step, unattended), checkpointing along the way."""
@@ -234,7 +270,9 @@ def run(
     action_log_store = ActionLogStore(_action_log_db_path(root))
     session_id = str(uuid.uuid4())
 
-    registry = _build_registry(root, memory_store, global_memory_store, skill_manager, session_id)
+    registry = _build_registry(
+        root, memory_store, global_memory_store, skill_manager, session_id, dry_run=dry_run
+    )
 
     run_autonomous(
         registry,
@@ -251,6 +289,8 @@ def run(
         model=model,
         usage_store=usage_store,
         action_log_store=action_log_store,
+        shell_allowlist=_parse_shell_allowlist(shell_allowlist),
+        dry_run=dry_run,
     )
 
 

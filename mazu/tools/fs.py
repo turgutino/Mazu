@@ -10,7 +10,7 @@ def _safe_path(root: Path, path: str) -> Path:
     return resolved
 
 
-def make_fs_tools(root: Path) -> list[Tool]:
+def make_fs_tools(root: Path, dry_run: bool = False) -> list[Tool]:
     def read_file(input: dict) -> ToolResult:
         try:
             p = _safe_path(root, input["path"])
@@ -25,6 +25,8 @@ def make_fs_tools(root: Path) -> list[Tool]:
     def write_file(input: dict) -> ToolResult:
         try:
             p = _safe_path(root, input["path"])
+            if dry_run:
+                return ToolResult(f"[dry-run] Would write {len(input['content'])} bytes to {input['path']}")
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(input["content"], encoding="utf-8")
             return ToolResult(f"Wrote {len(input['content'])} bytes to {input['path']}")
@@ -43,6 +45,12 @@ def make_fs_tools(root: Path) -> list[Tool]:
                 return ToolResult(
                     f"old_str matches {count} times; must be unique", is_error=True
                 )
+            # Even in dry-run mode, the file is still read and old_str's match count
+            # validated above -- this is what makes the dry-run report trustworthy
+            # (a plan that would fail for real fails here too, not just in the
+            # eventual real run) rather than an unconditional "sure, would work."
+            if dry_run:
+                return ToolResult(f"[dry-run] Would edit {input['path']} (replacing 1 occurrence)")
             p.write_text(text.replace(old, new), encoding="utf-8")
             return ToolResult(f"Edited {input['path']}")
         except Exception as e:

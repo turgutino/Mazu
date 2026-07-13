@@ -10,8 +10,9 @@ import pytest
 from click.testing import CliRunner
 
 import mazu
+import mazu.cli as cli_module
 from mazu.action_log.store import ActionLogStore
-from mazu.cli import _action_log_db_path, _memory_db_path, _usage_db_path, main
+from mazu.cli import _action_log_db_path, _memory_db_path, _parse_shell_allowlist, _usage_db_path, main
 from mazu.memory.store import MemoryStore
 from mazu.usage.store import UsageStore
 
@@ -683,3 +684,107 @@ def test_log_show_only_shows_the_requested_session(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert "s1 output" in result.output
     assert "s2 output" not in result.output
+
+
+# ---------------------------------------------------------------------------
+# Safer Execution (Phase E): --dry-run, --shell-allowlist
+# ---------------------------------------------------------------------------
+
+
+def test_parse_shell_allowlist_none_when_unset():
+    assert _parse_shell_allowlist(None) is None
+    assert _parse_shell_allowlist("") is None
+
+
+def test_parse_shell_allowlist_splits_and_trims():
+    assert _parse_shell_allowlist("git, npm , pytest") == ["git", "npm", "pytest"]
+
+
+def test_parse_shell_allowlist_drops_empty_entries():
+    assert _parse_shell_allowlist("git,,npm,") == ["git", "npm"]
+
+
+def test_run_dry_run_flag_reaches_run_autonomous(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-fake")
+
+    captured = {}
+
+    def _fake_run_autonomous(registry, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(cli_module, "run_autonomous", _fake_run_autonomous)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["run", "do something", "--dry-run", "--model", "deepseek:deepseek-chat"])
+
+    assert result.exit_code == 0, result.output
+    assert captured["dry_run"] is True
+
+
+def test_run_without_dry_run_flag_defaults_false(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-fake")
+
+    captured = {}
+
+    def _fake_run_autonomous(registry, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(cli_module, "run_autonomous", _fake_run_autonomous)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["run", "do something", "--model", "deepseek:deepseek-chat"])
+
+    assert result.exit_code == 0, result.output
+    assert captured["dry_run"] is False
+
+
+def test_run_shell_allowlist_flag_reaches_run_autonomous(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-fake")
+
+    captured = {}
+
+    def _fake_run_autonomous(registry, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(cli_module, "run_autonomous", _fake_run_autonomous)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["run", "do something", "--shell-allowlist", "git,npm", "--model", "deepseek:deepseek-chat"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["shell_allowlist"] == ["git", "npm"]
+
+
+def test_chat_shell_allowlist_flag_reaches_run_chat_loop(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-fake")
+
+    captured = {}
+
+    def _fake_run_chat_loop(registry, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(cli_module, "run_chat_loop", _fake_run_chat_loop)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["chat", "--shell-allowlist", "git,npm", "--model", "deepseek:deepseek-chat"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["shell_allowlist"] == ["git", "npm"]
+
+
+def test_run_help_documents_dry_run_and_shell_allowlist():
+    runner = CliRunner()
+    result = runner.invoke(main, ["run", "--help"])
+
+    assert result.exit_code == 0
+    assert "--dry-run" in result.output
+    assert "--shell-allowlist" in result.output

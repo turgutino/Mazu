@@ -111,6 +111,8 @@ Inside the `>` prompt, two extra commands are always available:
 
 Any destructive tool call (writing a file, editing a file, running a shell command) asks for confirmation first. Responses stream in as they're generated (token-by-token where the provider supports it), and each response's `[usage]` line includes a running estimated cost for the session where pricing data is available.
 
+`mazu chat --shell-allowlist "git,npm,pytest"` restricts shell commands to ones starting with a listed program name — opt-in, and additive to the hardcoded denylist below (which always applies regardless).
+
 ### Autonomous runs
 
 ```bash
@@ -126,13 +128,23 @@ Key flags:
 | `--max-steps N` | Stop after N tool-use rounds (default 15) |
 | `--checkpoint-every N` | Snapshot every N rounds (default 1) |
 | `--allow-shell` | Skip the confirmation prompt for shell commands (the hardcoded safety denylist below still applies) |
+| `--shell-allowlist "git,npm,pytest"` | Only allow shell commands starting with a listed program name (opt-in, additive to the denylist) |
+| `--dry-run` | Preview the task — no files written, no commands executed, no checkpoints created (see below) |
 | `--max-cost USD` | Stop once estimated spend (from a built-in pricing table) reaches this amount |
 | `--keep-checkpoints N` | Prune on-disk checkpoint data beyond the N most recent (default 50) |
 | `--model provider:model` | Override the model for this run |
 
-By default, file writes/edits proceed unattended in `run` mode (checkpoints make them recoverable), but shell commands still ask for confirmation unless `--allow-shell` is passed. Regardless of that flag, a hardcoded denylist always blocks a short list of genuinely dangerous commands: force-pushing, `sudo`, touching `~/.ssh`, disk-format commands, and `rm -rf /`-style wipes. Checkpoints undo file damage — they can't undo an irreversible external action like a force-push or a sent network request, so that backstop stays even with `--allow-shell`.
+By default, file writes/edits proceed unattended in `run` mode (checkpoints make them recoverable), but shell commands still ask for confirmation unless `--allow-shell` is passed. Regardless of that flag, a hardcoded denylist always blocks a short list of genuinely dangerous commands: force-pushing, `sudo`, touching `~/.ssh`, disk-format commands, and `rm -rf /`-style wipes — and blocked commands now say *why* (e.g. "elevates privileges via sudo"), not just that a rule matched. Checkpoints undo file damage — they can't undo an irreversible external action like a force-push or a sent network request, so that backstop stays even with `--allow-shell`.
 
 `mazu run` refuses to start on a dirty working tree, so the first checkpoint is always a clean baseline. If it's interrupted with **Ctrl-C**, you're offered `[c]ontinue`, `[r]ollback <id>`, or `[q]uit` before anything is lost.
+
+#### Dry runs
+
+```bash
+mazu run "refactor the auth module to use the new session API" --dry-run
+```
+
+`--dry-run` runs the task loop for real — the model still reasons, plans, and calls tools — but `write_file`/`edit_file`/`run_shell` report what they *would* do (`[dry-run] Would write 340 bytes to auth.py`) instead of touching disk or a shell. Read-only tools (`read_file`, `list_dir`, `glob_files`, `recall`) still run for real, so the model's plan is grounded in the actual project, not a guess. No checkpoints are created (nothing changed to snapshot), and the usual clean-working-tree requirement is waived, since a preview has no risk of corrupting a checkpoint baseline. Everything the plan would have done is still visible afterward via `mazu log show <session_id>`.
 
 ### Checkpoints & rollback
 

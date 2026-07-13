@@ -10,7 +10,7 @@ from mazu.llm.pricing import estimate_cost
 from mazu.memory.store import MemoryStore
 from mazu.skills.manager import SkillManager
 from mazu.tools.registry import ToolRegistry
-from mazu.tools.shell import is_denied_shell_command
+from mazu.tools.shell import denylist_reason, is_allowed_by_shell_allowlist
 from mazu.usage.store import UsageStore
 
 
@@ -29,6 +29,7 @@ def run_chat_loop(
     model: str | None = None,
     usage_store: UsageStore | None = None,
     action_log_store: ActionLogStore | None = None,
+    shell_allowlist: list[str] | None = None,
 ) -> None:
     messages: list[dict] = []
     system_prompt = None  # built lazily from the first real task, so retrieval has a query
@@ -83,6 +84,7 @@ def run_chat_loop(
                 session_id,
                 total_cost,
                 action_log_store,
+                shell_allowlist,
             )
     finally:
         if memory_store is not None:
@@ -142,6 +144,7 @@ def _run_until_done(
     session_id: str,
     total_cost: float,
     action_log_store: ActionLogStore | None = None,
+    shell_allowlist: list[str] | None = None,
 ) -> float:
     provider_name, model_name = _split_model(resolved_model)
     while True:
@@ -202,22 +205,23 @@ def _run_until_done(
                     }
                 )
                 continue
-            if tool.name == "run_shell" and is_denied_shell_command(
-                block["input"].get("command", "")
-            ):
-                record_action(
-                    action_log_store, session_id, "chat", tool.name, block["input"],
-                    "blocked", "Blocked: command matches the safety denylist.",
-                )
-                tool_results.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": block["id"],
-                        "content": "Blocked: command matches the safety denylist.",
-                        "is_error": True,
-                    }
-                )
-                continue
+            if tool.name == "run_shell":
+                command = block["input"].get("command", "")
+                reason = denylist_reason(command)
+                if reason is not None:
+                    msg = f"Blocked: command {reason} (safety denylist)."
+                    record_action(action_log_store, session_id, "chat", tool.name, block["input"], "blocked", msg)
+                    tool_results.append(
+                        {"type": "tool_result", "tool_use_id": block["id"], "content": msg, "is_error": True}
+                    )
+                    continue
+                if not is_allowed_by_shell_allowlist(command, shell_allowlist):
+                    msg = f"Blocked: command is not in the shell allowlist ({', '.join(shell_allowlist)})."
+                    record_action(action_log_store, session_id, "chat", tool.name, block["input"], "blocked", msg)
+                    tool_results.append(
+                        {"type": "tool_result", "tool_use_id": block["id"], "content": msg, "is_error": True}
+                    )
+                    continue
             if tool.destructive and not _confirm(tool.name, block["input"]):
                 record_action(
                     action_log_store, session_id, "chat", tool.name, block["input"],

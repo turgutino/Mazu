@@ -11,7 +11,7 @@ from mazu.llm.pricing import estimate_cost
 from mazu.memory.store import MemoryStore
 from mazu.skills.manager import SkillManager
 from mazu.tools.registry import ToolRegistry
-from mazu.tools.shell import is_denied_shell_command
+from mazu.tools.shell import denylist_reason, is_allowed_by_shell_allowlist
 from mazu.usage.store import UsageStore
 
 
@@ -31,8 +31,15 @@ def run_autonomous(
     model: str | None = None,
     usage_store: UsageStore | None = None,
     action_log_store: ActionLogStore | None = None,
+    shell_allowlist: list[str] | None = None,
+    dry_run: bool = False,
 ) -> None:
-    if checkpoint_manager.is_dirty():
+    # The clean-baseline requirement exists so a real run's checkpoints are
+    # meaningful diffs against a known-good starting point. A dry run never writes
+    # a file, runs a command for real, or creates a checkpoint, so there's nothing
+    # for a dirty tree to make ambiguous -- and refusing to preview a plan just
+    # because you have other uncommitted work in progress would be actively unhelpful.
+    if not dry_run and checkpoint_manager.is_dirty():
         print(
             "Working tree has uncommitted changes. `mazu run` requires a clean baseline "
             "so checkpoints are meaningful. Commit your changes first (or run `mazu checkpoint`)."
@@ -60,7 +67,8 @@ def run_autonomous(
     print(
         f"run — task: {task}\n"
         f"max-steps={max_steps} checkpoint-every={checkpoint_every} allow-shell={allow_shell}"
-        f"{f' max-cost=${max_cost:.2f}' if max_cost is not None and cost_trackable else ''}\n"
+        f"{f' max-cost=${max_cost:.2f}' if max_cost is not None and cost_trackable else ''}"
+        f"{' [DRY RUN — no files will be written, no commands will be run, no checkpoints will be created]' if dry_run else ''}\n"
     )
 
     step = 0
@@ -138,7 +146,7 @@ def run_autonomous(
                     break
 
                 tool_results, round_failed = _execute_round(
-                    response, registry, allow_shell, action_log_store, session_id
+                    response, registry, allow_shell, action_log_store, session_id, shell_allowlist, dry_run
                 )
                 messages.append({"role": "user", "content": tool_results})
 
@@ -147,13 +155,18 @@ def run_autonomous(
                     print(f"\nStopping: {max_consecutive_failures} consecutive tool failures.")
                     break
 
-                if step % checkpoint_every == 0:
+                if not dry_run and step % checkpoint_every == 0:
                     summary = text_blocks[0][:100] if text_blocks else f"step {step}"
                     entry = checkpoint_manager.snapshot(
                         messages, trigger="auto_after_tool_round", summary=summary
                     )
                     print(f"[checkpoint {entry['id']} @ {entry['git_commit'][:8]}]")
             except KeyboardInterrupt:
+                if dry_run:
+                    # Nothing was actually written, so there's nothing to preview a
+                    # rollback of and no live conversation state to preserve across
+                    # a restore -- just stop, matching the "no side effects" contract.
+                    break
                 if not _handle_interrupt(checkpoint_manager, messages):
                     break
         else:
@@ -175,6 +188,8 @@ def _execute_round(
     allow_shell: bool,
     action_log_store: ActionLogStore | None = None,
     session_id: str | None = None,
+    shell_allowlist: list[str] | None = None,
+    dry_run: bool = False,
 ) -> tuple[list[dict], bool]:
     tool_results = []
     round_failed = False
@@ -200,22 +215,28 @@ def _execute_round(
 
         if tool.name == "run_shell":
             command = block["input"].get("command", "")
-            if is_denied_shell_command(command):
-                record_action(
-                    action_log_store, session_id, "run", tool.name, block["input"],
-                    "blocked", "Blocked: command matches the safety denylist.",
-                )
+            reason = denylist_reason(command)
+            if reason is not None:
+                msg = f"Blocked: command {reason} (safety denylist)."
+                record_action(action_log_store, session_id, "run", tool.name, block["input"], "blocked", msg)
                 tool_results.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": block["id"],
-                        "content": "Blocked: command matches the safety denylist.",
-                        "is_error": True,
-                    }
+                    {"type": "tool_result", "tool_use_id": block["id"], "content": msg, "is_error": True}
                 )
                 round_failed = True
                 continue
-            if not allow_shell:
+            if not is_allowed_by_shell_allowlist(command, shell_allowlist):
+                msg = f"Blocked: command is not in the shell allowlist ({', '.join(shell_allowlist)})."
+                record_action(action_log_store, session_id, "run", tool.name, block["input"], "blocked", msg)
+                tool_results.append(
+                    {"type": "tool_result", "tool_use_id": block["id"], "content": msg, "is_error": True}
+                )
+                round_failed = True
+                continue
+            # In dry-run mode the shell tool itself is a no-op (make_shell_tool's
+            # dry_run branch), so there is nothing destructive to gate behind a
+            # confirmation prompt -- skip it entirely rather than interrupting an
+            # unattended preview run for a question with no real consequence either way.
+            if not allow_shell and not dry_run:
                 print(f"\n[confirm] run_shell({block['input']})")
                 if not safe_confirm("Run this? [y/N] "):
                     record_action(

@@ -36,10 +36,10 @@ This file is split into two parts on purpose:
 - [x] `mazu log` — list recent sessions/runs
 - [x] `mazu log show <session_id>` — full action log for one session
 
-### Phase E — Safer Execution
-- [ ] `mazu run "..." --dry-run` — show what would happen without writing/running anything
-- [ ] Shell command allowlist mode (opt-in, alongside the existing denylist)
-- [ ] Clearer explanation text when a command is blocked or flagged risky
+### Phase E — Safer Execution ✅ done
+- [x] `mazu run "..." --dry-run` — show what would happen without writing/running anything; skips the clean-working-tree gate and checkpoint creation, since nothing changes; read-only tools still run for real
+- [x] Shell command allowlist mode (opt-in, alongside the existing denylist) — `--shell-allowlist` on both `mazu chat` and `mazu run`; the denylist is a hard backstop that always applies on top, an allowlist entry can't rescue a denylisted command
+- [x] Clearer explanation text when a command is blocked — each denylist rule now carries a human-readable reason ("elevates privileges via sudo") instead of a generic "matches the safety denylist"
 
 ### Phase F — Better Autonomous Runs
 - [ ] Run id system (already have session_id; formalize as a first-class concept in `mazu run`)
