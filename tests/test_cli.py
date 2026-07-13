@@ -219,3 +219,77 @@ def test_memory_consolidate_global_flag_uses_global_store(tmp_path, monkeypatch)
     project_store = MemoryStore(_memory_db_path(tmp_path))
     assert project_store.all_active() == []
     project_store.close()
+
+
+# ---------------------------------------------------------------------------
+# timeline / checkpoint show / checkpoint diff (Checkpoint UX)
+# ---------------------------------------------------------------------------
+
+
+def test_timeline_empty_project(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(main, ["timeline"])
+
+    assert result.exit_code == 0
+    assert "No checkpoints yet." in result.output
+
+
+def test_timeline_shows_files_changed_between_checkpoints(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+
+    runner.invoke(main, ["checkpoint"])
+    (tmp_path / "new_file.py").write_text("x")
+    result = runner.invoke(main, ["checkpoint"])
+    assert result.exit_code == 0, result.output
+
+    result = runner.invoke(main, ["timeline"])
+    assert result.exit_code == 0, result.output
+    assert "cp_000001" in result.output
+    assert "cp_000002" in result.output
+    assert "new_file.py" in result.output
+
+
+def test_checkpoint_show_unknown_id_reports_cleanly(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    runner.invoke(main, ["checkpoint"])  # ensure a git repo + at least one checkpoint exist
+
+    result = runner.invoke(main, ["checkpoint", "show", "cp_999999"])
+    assert result.exit_code == 0  # reports the error, doesn't crash
+    assert "No checkpoint found" in result.output
+
+
+def test_checkpoint_show_defaults_to_most_recent(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    runner.invoke(main, ["checkpoint"])
+
+    result = runner.invoke(main, ["checkpoint", "show"])
+    assert result.exit_code == 0, result.output
+    assert "cp_000001" in result.output
+    assert "Memory snapshot:" in result.output
+
+
+def test_checkpoint_diff_shows_untracked_new_file(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    runner.invoke(main, ["checkpoint"])
+
+    (tmp_path / "brand_new.py").write_text("x")
+
+    result = runner.invoke(main, ["checkpoint", "diff"])
+    assert result.exit_code == 0, result.output
+    assert "brand_new.py" in result.output
+    assert "untracked" in result.output.lower()
+
+
+def test_checkpoint_diff_no_changes(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    runner.invoke(main, ["checkpoint"])
+
+    result = runner.invoke(main, ["checkpoint", "diff"])
+    assert result.exit_code == 0, result.output
+    assert "(no changes)" in result.output

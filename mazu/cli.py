@@ -325,6 +325,47 @@ def checkpoint_list() -> None:
         )
 
 
+@checkpoint.command("show")
+@click.argument("checkpoint_id", required=False)
+def checkpoint_show(checkpoint_id: str | None) -> None:
+    """Show one checkpoint's full detail (defaults to the most recent one)."""
+    root = Path.cwd()
+    checkpoint_manager = CheckpointManager(root)
+    try:
+        entry = checkpoint_manager.show_entry(checkpoint_id)
+    except ValueError as e:
+        click.echo(str(e))
+        return
+    click.echo(f"Checkpoint {entry['id']}")
+    click.echo(f"  Created:          {entry['created_at']}")
+    click.echo(f"  Trigger:          {entry['trigger']}")
+    click.echo(f"  Summary:          {entry['summary']}")
+    click.echo(f"  Git commit:       {entry['git_commit'][:8]}")
+    click.echo(f"  Conversation:     {entry['message_count']} message(s)")
+    click.echo(f"  Memory snapshot:  {'yes' if entry['has_memory_snapshot'] else 'no'}")
+    click.echo(f"  Skills snapshot:  {'yes' if entry['has_skills_snapshot'] else 'no'}")
+
+
+@checkpoint.command("diff")
+@click.argument("checkpoint_id", required=False)
+def checkpoint_diff(checkpoint_id: str | None) -> None:
+    """Show what's changed between a checkpoint and the current working tree
+    (defaults to the most recent checkpoint). Read-only -- does not touch anything,
+    unlike `mazu rollback`."""
+    root = Path.cwd()
+    checkpoint_manager = CheckpointManager(root)
+    try:
+        entry, diff = checkpoint_manager.diff_against_current(checkpoint_id)
+    except ValueError as e:
+        click.echo(str(e))
+        return
+    click.echo(f"Diff since {entry['id']} ({entry['created_at']}):\n")
+    if diff.strip():
+        click.echo(diff)
+    else:
+        click.echo("(no changes)")
+
+
 @checkpoint.command("prune")
 @click.option(
     "--keep",
@@ -340,6 +381,31 @@ def checkpoint_prune(keep: int | None) -> None:
     checkpoint_manager = CheckpointManager(root, **checkpoint_kwargs)
     pruned = checkpoint_manager.prune()
     click.echo(f"Pruned {pruned} checkpoint(s)." if pruned else "Nothing to prune.")
+
+
+@main.command("timeline")
+def timeline() -> None:
+    """Readable history of every checkpoint: what changed since the previous one,
+    and whether a memory/skills snapshot exists — a step-by-step view, not just a
+    flat id list (see `mazu checkpoint list` for that)."""
+    root = Path.cwd()
+    checkpoint_manager = CheckpointManager(root)
+    entries = checkpoint_manager.timeline_entries()
+    if not entries:
+        click.echo("No checkpoints yet.")
+        return
+    for entry in entries:
+        click.echo(f"{entry['id']}  {entry['created_at']}  ({entry['trigger']}) {entry['summary']}")
+        click.echo(f"    commit: {entry['git_commit'][:8]}")
+        if entry["files_changed"]:
+            click.echo(f"    files:  {', '.join(entry['files_changed'])}")
+        else:
+            click.echo("    files:  (first checkpoint — nothing to compare against)")
+        flags = []
+        flags.append("memory" if entry["has_memory_snapshot"] else "no memory")
+        flags.append("skills" if entry["has_skills_snapshot"] else "no skills")
+        click.echo(f"    snapshot: {', '.join(flags)}")
+        click.echo()
 
 
 @main.command("usage")

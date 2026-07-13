@@ -131,3 +131,150 @@ def test_is_dirty_detects_uncommitted_changes(project: Path):
 
     (project / "new_file.py").write_text("x")
     assert manager.is_dirty() is True
+
+
+# ---------------------------------------------------------------------------
+# timeline / show / diff (Checkpoint UX)
+# ---------------------------------------------------------------------------
+
+
+def test_has_memory_snapshot_true_when_present(project: Path):
+    from mazu.memory.store import MemoryStore
+
+    mazu_dir = project / ".mazu"
+    mazu_dir.mkdir()
+    MemoryStore(mazu_dir / "memory.db").close()
+
+    manager = CheckpointManager(project)
+    entry = manager.snapshot(messages=[], trigger="manual")
+
+    assert manager.has_memory_snapshot(entry["id"]) is True
+
+
+def test_has_memory_snapshot_false_when_absent(project: Path):
+    manager = CheckpointManager(project)
+    entry = manager.snapshot(messages=[], trigger="manual")
+    assert manager.has_memory_snapshot(entry["id"]) is False
+
+
+def test_has_skills_snapshot_true_when_present(project: Path):
+    from mazu.skills.manager import SkillManager
+
+    SkillManager(project).save("s1", "does a thing", "def run(args):\n    return 'ok'")
+    manager = CheckpointManager(project)
+    entry = manager.snapshot(messages=[], trigger="manual")
+
+    assert manager.has_skills_snapshot(entry["id"]) is True
+
+
+def test_show_entry_reports_message_count(project: Path):
+    manager = CheckpointManager(project)
+    entry = manager.snapshot(
+        messages=[{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}],
+        trigger="manual",
+    )
+
+    shown = manager.show_entry(entry["id"])
+    assert shown["message_count"] == 2
+    assert shown["id"] == entry["id"]
+    assert shown["has_memory_snapshot"] is False
+
+
+def test_show_entry_defaults_to_most_recent(project: Path):
+    manager = CheckpointManager(project)
+    manager.snapshot(messages=[], trigger="manual")
+    second = manager.snapshot(messages=[{"role": "user", "content": "x"}], trigger="manual")
+
+    shown = manager.show_entry()  # no id -- should resolve to the last one
+    assert shown["id"] == second["id"]
+
+
+def test_show_entry_unknown_id_raises(project: Path):
+    manager = CheckpointManager(project)
+    manager.ensure_git_repo()
+    with pytest.raises(ValueError):
+        manager.show_entry("cp_999999")
+
+
+def test_diff_against_current_reflects_tracked_file_changes(project: Path):
+    (project / "a.py").write_text("print('a')")
+    manager = CheckpointManager(project)
+    entry = manager.snapshot(messages=[], trigger="manual")
+
+    (project / "a.py").write_text("print('a')\nprint('more')")
+
+    _, diff = manager.diff_against_current(entry["id"])
+    assert "a.py" in diff
+
+
+def test_diff_against_current_includes_untracked_new_files(project: Path):
+    """git diff alone never shows untracked files at all -- a file the agent
+    created since the checkpoint but never `git add`ed would otherwise silently
+    vanish from the diff, which defeats the point of this command.
+    """
+    manager = CheckpointManager(project)
+    entry = manager.snapshot(messages=[], trigger="manual")
+
+    (project / "b.py").write_text("print('b')")  # deliberately never git add'ed
+
+    _, diff = manager.diff_against_current(entry["id"])
+    assert "b.py" in diff
+    assert "untracked" in diff.lower()
+
+
+def test_timeline_entries_first_checkpoint_has_no_files_changed(project: Path):
+    (project / "a.py").write_text("print('a')")
+    manager = CheckpointManager(project)
+    manager.snapshot(messages=[], trigger="manual")
+
+    timeline = manager.timeline_entries()
+    assert len(timeline) == 1
+    assert timeline[0]["files_changed"] == []
+
+
+def test_timeline_entries_shows_changes_since_previous_checkpoint(project: Path):
+    manager = CheckpointManager(project)
+    manager.snapshot(messages=[], trigger="manual")  # cp_000001, nothing yet
+
+    (project / "new_file.py").write_text("x")
+    manager.snapshot(messages=[], trigger="manual")  # cp_000002, new_file.py added
+
+    timeline = manager.timeline_entries()
+    assert timeline[0]["files_changed"] == []
+    assert "new_file.py" in timeline[1]["files_changed"]
+
+
+def test_timeline_entries_includes_snapshot_flags(project: Path):
+    from mazu.memory.store import MemoryStore
+
+    mazu_dir = project / ".mazu"
+    mazu_dir.mkdir()
+    MemoryStore(mazu_dir / "memory.db").close()
+
+    manager = CheckpointManager(project)
+    manager.snapshot(messages=[], trigger="manual")
+
+    timeline = manager.timeline_entries()
+    assert timeline[0]["has_memory_snapshot"] is True
+    assert timeline[0]["has_skills_snapshot"] is False
+
+
+def test_timeline_entries_empty_when_no_checkpoints(project: Path):
+    manager = CheckpointManager(project)
+    assert manager.timeline_entries() == []
+
+
+def test_preview_rollback_shows_uncommitted_changes_to_the_latest_checkpoint(project: Path):
+    """Regression test: `git diff <commit> HEAD` (two explicit commit refs) shows
+    nothing when `commit` IS HEAD, even with real uncommitted working-tree changes
+    -- since both sides of the diff are the same commit. preview_rollback (used by
+    `mazu rollback`) must still show what would actually be discarded.
+    """
+    (project / "a.py").write_text("print('a')")
+    manager = CheckpointManager(project)
+    entry = manager.snapshot(messages=[], trigger="manual")  # this becomes HEAD
+
+    (project / "a.py").write_text("print('a')\nprint('uncommitted edit')")
+
+    _, diff = manager.preview_rollback(entry["id"])
+    assert "a.py" in diff

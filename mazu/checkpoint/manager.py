@@ -127,13 +127,117 @@ class CheckpointManager:
     def list_checkpoints(self) -> list[dict]:
         return self.index.load()
 
-    def preview_rollback(self, checkpoint_id: str | None = None) -> tuple[dict, str]:
+    def _resolve_entry(self, checkpoint_id: str | None) -> dict:
+        """Shared lookup for every method that takes an optional checkpoint id --
+        None means "the most recent one", matching how /rollback and `mazu
+        rollback` already behave with no argument.
+        """
         entry = self.index.get(checkpoint_id) if checkpoint_id else self.index.last()
         if entry is None:
             available = ", ".join(e["id"] for e in self.index.load()) or "(none)"
             raise ValueError(f"No checkpoint found for id={checkpoint_id!r}. Available: {available}")
-        diff = _git(self.root, ["diff", entry["git_commit"], "HEAD", "--stat"]).stdout
+        return entry
+
+    def _diff_args(self, commit_hash: str, against: str) -> list[str]:
+        # "HEAD" is the sentinel for "the live working tree, including uncommitted
+        # changes" -- `git diff <commit> HEAD` (two explicit refs) compares two
+        # *commits* and would silently show nothing for any edit that hasn't been
+        # committed yet (a very real case: this checkpoint IS the current HEAD, and
+        # the working tree has since been hand-edited). Omitting the second ref
+        # entirely is git's own way of diffing a commit against the working tree.
+        # A real commit hash (used by timeline_entries for checkpoint-to-checkpoint
+        # comparisons) is passed through as an explicit second ref as normal.
+        return ["diff", commit_hash] if against == "HEAD" else ["diff", commit_hash, against]
+
+    def _diff_stat(self, commit_hash: str, against: str = "HEAD") -> str:
+        return _git(self.root, [*self._diff_args(commit_hash, against), "--stat"]).stdout
+
+    def _diff_names(self, commit_hash: str, against: str) -> list[str]:
+        result = _git(self.root, [*self._diff_args(commit_hash, against), "--name-only"])
+        names = [line for line in result.stdout.splitlines() if line.strip()]
+        if against == "HEAD":
+            # `git diff` never lists untracked files regardless of which ref it's
+            # compared against -- a file created since the checkpoint but never
+            # `git add`ed would otherwise silently vanish from "what changed",
+            # which defeats the point of a diff view. Only relevant when comparing
+            # against the live working tree ("HEAD"); a commit-to-commit diff (used
+            # by timeline_entries) is always clean, since snapshot() always `git
+            # add -A`s before committing.
+            names.extend(f for f in self._untracked_files() if f not in names)
+        return names
+
+    def _untracked_files(self) -> list[str]:
+        result = _git(self.root, ["status", "--porcelain"])
+        return [line[3:] for line in result.stdout.splitlines() if line.startswith("??")]
+
+    def has_memory_snapshot(self, checkpoint_id: str) -> bool:
+        return (self.checkpoints_dir / checkpoint_id / "memory.db").exists()
+
+    def has_skills_snapshot(self, checkpoint_id: str) -> bool:
+        return (self.checkpoints_dir / checkpoint_id / "skills").exists()
+
+    def preview_rollback(self, checkpoint_id: str | None = None) -> tuple[dict, str]:
+        entry = self._resolve_entry(checkpoint_id)
+        diff = self._diff_stat(entry["git_commit"])
         return entry, diff
+
+    def diff_against_current(self, checkpoint_id: str | None = None) -> tuple[dict, str]:
+        """Like preview_rollback, but meant for inspection (`mazu checkpoint diff`),
+        not as a precursor to an actual rollback. Unlike preview_rollback's raw
+        `--stat` output (kept as-is to avoid touching the existing rollback
+        confirmation flow), this also calls out untracked new files explicitly --
+        `git diff --stat` alone silently omits them entirely (see _diff_names).
+        """
+        entry = self._resolve_entry(checkpoint_id)
+        diff = self._diff_stat(entry["git_commit"])
+        untracked = self._untracked_files()
+        if untracked:
+            diff = diff.rstrip() + "\n\nNew (untracked) files:\n" + "\n".join(f"  {f}" for f in untracked)
+        return entry, diff
+
+    def show_entry(self, checkpoint_id: str | None = None) -> dict:
+        """Full detail for one checkpoint: its index metadata plus how many messages
+        its conversation snapshot holds and whether memory/skills were captured.
+        """
+        entry = self._resolve_entry(checkpoint_id)
+        conversation_path = self.checkpoints_dir / entry["id"] / "conversation.json"
+        message_count = 0
+        if conversation_path.exists():
+            try:
+                message_count = len(json.loads(conversation_path.read_text(encoding="utf-8")))
+            except (json.JSONDecodeError, OSError):
+                message_count = 0
+        return {
+            **entry,
+            "message_count": message_count,
+            "has_memory_snapshot": self.has_memory_snapshot(entry["id"]),
+            "has_skills_snapshot": self.has_skills_snapshot(entry["id"]),
+        }
+
+    def timeline_entries(self) -> list[dict]:
+        """Every checkpoint's index metadata enriched with what changed since the
+        *previous* checkpoint (not since HEAD -- this is a step-by-step history
+        view, not a series of cumulative diffs) and whether a memory/skills
+        snapshot exists. The first checkpoint has no predecessor to diff against,
+        so its files_changed is empty rather than guessed at.
+        """
+        entries = self.index.load()
+        result = []
+        prev_commit = None
+        for entry in entries:
+            files_changed = (
+                self._diff_names(prev_commit, entry["git_commit"]) if prev_commit is not None else []
+            )
+            result.append(
+                {
+                    **entry,
+                    "files_changed": files_changed,
+                    "has_memory_snapshot": self.has_memory_snapshot(entry["id"]),
+                    "has_skills_snapshot": self.has_skills_snapshot(entry["id"]),
+                }
+            )
+            prev_commit = entry["git_commit"]
+        return result
 
     def restore(self, checkpoint_id: str) -> dict:
         entry = self.index.get(checkpoint_id)

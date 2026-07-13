@@ -184,13 +184,23 @@ When the agent solves a reusable problem, it can save the solution as a plain Py
 
 ```bash
 mazu checkpoint                     # manually snapshot code + memory (outside a chat session)
-mazu checkpoint list                # list all checkpoints for this project
+mazu checkpoint list                # flat list of all checkpoints for this project
 mazu checkpoint prune --keep 20     # drop old on-disk snapshot copies (git history is untouched)
 mazu rollback                       # restore to the most recent checkpoint
 mazu rollback cp_000003             # restore to a specific one
 ```
 
 A checkpoint bundles a git commit, a consistent copy of the memory database (taken via SQLite's online backup API, safe even mid-write), the skill library, and the conversation transcript. Restoring one restores all of them together, so code, what the agent remembers, and what it was talking about never drift out of sync with each other.
+
+To actually *see* a checkpoint's history instead of just an id list:
+
+```bash
+mazu timeline                       # every checkpoint: what changed since the previous one, memory/skills snapshot status
+mazu checkpoint show cp_000003      # one checkpoint's full detail — commit, conversation length, snapshot status
+mazu checkpoint diff cp_000003      # what's different between that checkpoint and right now (read-only, no rollback)
+```
+
+`checkpoint diff` calls out newly created files explicitly, in a separate section — `git diff` itself never lists untracked files no matter what it's compared against, so a file the agent created but never `git add`ed would otherwise silently disappear from the diff.
 
 ### Council mode
 
