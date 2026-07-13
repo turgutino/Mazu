@@ -156,6 +156,17 @@ mazu checkpoint diff cp_000003      # what's different between that checkpoint a
 
 `checkpoint diff` calls out newly created files explicitly, in a separate section — `git diff` itself never lists untracked files no matter what it's compared against, so a file the agent created but never `git add`ed would otherwise silently disappear from the diff.
 
+A few more ways to work with checkpoint history without touching your current state:
+
+```bash
+mazu checkpoint inspect cp_000003 --memory         # the memories actually captured in that snapshot
+mazu checkpoint inspect cp_000003 --conversation   # the conversation transcript captured in that snapshot
+mazu checkpoint compare cp_000001 cp_000005        # diff between two checkpoints directly (not either vs. now)
+mazu branch-from cp_000003 my-experiment           # new git branch at that commit, current branch untouched
+```
+
+`branch-from` is deliberately lighter than `mazu rollback`: it only creates a git branch pointer, it never resets your working tree or restores memory/skills, and your current branch stays checked out. It's for exploring "what if I'd gone a different way from here" without the heavier, stateful implications of a full rollback — switch into it yourself with `git checkout my-experiment` when you're ready.
+
 ### Memory
 
 ```bash

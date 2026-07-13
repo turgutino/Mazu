@@ -278,3 +278,125 @@ def test_preview_rollback_shows_uncommitted_changes_to_the_latest_checkpoint(pro
 
     _, diff = manager.preview_rollback(entry["id"])
     assert "a.py" in diff
+
+
+# ---------------------------------------------------------------------------
+# inspect / compare / branch-from (rest of Phase B)
+# ---------------------------------------------------------------------------
+
+
+def test_inspect_memory_reads_from_the_snapshot_not_live_db(project: Path):
+    from mazu.memory.store import MemoryStore
+
+    mazu_dir = project / ".mazu"
+    mazu_dir.mkdir()
+    store = MemoryStore(mazu_dir / "memory.db")
+    store.add(category="fact", title="Before checkpoint", body="x")
+    store.close()
+
+    manager = CheckpointManager(project)
+    entry = manager.snapshot(messages=[], trigger="manual")
+
+    # Add a fact AFTER the checkpoint -- inspect_memory must NOT see this, since
+    # it reads the frozen snapshot, not the live (now-ahead) memory.db.
+    store = MemoryStore(mazu_dir / "memory.db")
+    store.add(category="fact", title="After checkpoint", body="y")
+    store.close()
+
+    memories = manager.inspect_memory(entry["id"])
+    titles = {m["title"] for m in memories}
+    assert titles == {"Before checkpoint"}
+
+
+def test_inspect_memory_empty_when_no_snapshot(project: Path):
+    manager = CheckpointManager(project)
+    entry = manager.snapshot(messages=[], trigger="manual")
+    assert manager.inspect_memory(entry["id"]) == []
+
+
+def test_inspect_conversation_returns_the_captured_messages(project: Path):
+    manager = CheckpointManager(project)
+    messages = [{"role": "user", "content": "hello"}, {"role": "assistant", "content": "hi"}]
+    entry = manager.snapshot(messages=messages, trigger="manual")
+
+    assert manager.inspect_conversation(entry["id"]) == messages
+
+
+def test_inspect_conversation_empty_when_no_messages(project: Path):
+    manager = CheckpointManager(project)
+    entry = manager.snapshot(messages=[], trigger="manual")
+    assert manager.inspect_conversation(entry["id"]) == []
+
+
+def test_compare_shows_diff_between_two_checkpoints(project: Path):
+    manager = CheckpointManager(project)
+    entry_a = manager.snapshot(messages=[], trigger="manual")
+
+    (project / "new_file.py").write_text("x")
+    entry_b = manager.snapshot(messages=[], trigger="manual")
+
+    a, b, diff = manager.compare(entry_a["id"], entry_b["id"])
+    assert a["id"] == entry_a["id"]
+    assert b["id"] == entry_b["id"]
+    assert "new_file.py" in diff
+
+
+def test_compare_identical_checkpoints_shows_no_diff(project: Path):
+    manager = CheckpointManager(project)
+    entry = manager.snapshot(messages=[], trigger="manual")
+
+    _, _, diff = manager.compare(entry["id"], entry["id"])
+    assert diff.strip() == ""
+
+
+def test_compare_unknown_id_raises(project: Path):
+    manager = CheckpointManager(project)
+    entry = manager.snapshot(messages=[], trigger="manual")
+    with pytest.raises(ValueError):
+        manager.compare(entry["id"], "cp_999999")
+
+
+def test_branch_from_creates_branch_at_checkpoint_commit(project: Path):
+    manager = CheckpointManager(project)
+    entry = manager.snapshot(messages=[], trigger="manual")
+
+    manager.branch_from(entry["id"], "my-experiment")
+
+    result = subprocess.run(
+        ["git", "branch", "--list", "my-experiment"], cwd=project, capture_output=True, text=True
+    )
+    assert "my-experiment" in result.stdout
+
+
+def test_branch_from_does_not_touch_current_branch_or_working_tree(project: Path):
+    (project / "a.py").write_text("original")
+    manager = CheckpointManager(project)
+    entry = manager.snapshot(messages=[], trigger="manual")
+
+    (project / "a.py").write_text("modified after checkpoint")  # uncommitted change
+
+    manager.branch_from(entry["id"], "my-experiment")
+
+    # Still on main/master, uncommitted change untouched -- branch_from must not
+    # check out the new branch or reset anything, unlike restore().
+    current_branch = subprocess.run(
+        ["git", "branch", "--show-current"], cwd=project, capture_output=True, text=True
+    ).stdout.strip()
+    assert current_branch != "my-experiment"
+    assert (project / "a.py").read_text() == "modified after checkpoint"
+
+
+def test_branch_from_duplicate_name_raises_clean_error(project: Path):
+    manager = CheckpointManager(project)
+    entry = manager.snapshot(messages=[], trigger="manual")
+    manager.branch_from(entry["id"], "my-experiment")
+
+    with pytest.raises(ValueError):
+        manager.branch_from(entry["id"], "my-experiment")
+
+
+def test_branch_from_unknown_checkpoint_raises(project: Path):
+    manager = CheckpointManager(project)
+    manager.ensure_git_repo()
+    with pytest.raises(ValueError):
+        manager.branch_from("cp_999999", "my-experiment")

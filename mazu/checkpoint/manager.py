@@ -195,6 +195,63 @@ class CheckpointManager:
             diff = diff.rstrip() + "\n\nNew (untracked) files:\n" + "\n".join(f"  {f}" for f in untracked)
         return entry, diff
 
+    def inspect_memory(self, checkpoint_id: str | None = None) -> list[dict]:
+        """Reads the memories captured in a checkpoint's memory.db *snapshot*
+        directly (not the live, current memory.db) -- what the project's memory
+        actually looked like at that point in history. Empty list if no memory
+        snapshot was captured for this checkpoint (e.g. .mazu/memory.db didn't
+        exist yet when it was taken).
+        """
+        entry = self._resolve_entry(checkpoint_id)
+        snapshot_db = self.checkpoints_dir / entry["id"] / "memory.db"
+        if not snapshot_db.exists():
+            return []
+        from mazu.memory.store import MemoryStore
+
+        store = MemoryStore(snapshot_db)
+        try:
+            return [dict(row) for row in store.all_active()]
+        finally:
+            store.close()
+
+    def inspect_conversation(self, checkpoint_id: str | None = None) -> list[dict]:
+        """Returns the raw message list captured in a checkpoint's
+        conversation.json snapshot. Empty list if none was captured.
+        """
+        entry = self._resolve_entry(checkpoint_id)
+        conversation_path = self.checkpoints_dir / entry["id"] / "conversation.json"
+        if not conversation_path.exists():
+            return []
+        try:
+            return json.loads(conversation_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return []
+
+    def compare(self, checkpoint_id_a: str, checkpoint_id_b: str) -> tuple[dict, dict, str]:
+        """Diff between two checkpoints' commits directly (not either one vs. the
+        current working tree, unlike diff_against_current) -- both refs are real
+        commits here, so no working-tree-vs-HEAD subtlety applies.
+        """
+        entry_a = self._resolve_entry(checkpoint_id_a)
+        entry_b = self._resolve_entry(checkpoint_id_b)
+        diff = self._diff_stat(entry_a["git_commit"], entry_b["git_commit"])
+        return entry_a, entry_b, diff
+
+    def branch_from(self, checkpoint_id: str | None, branch_name: str) -> dict:
+        """Creates a new git branch pointing at a checkpoint's commit, without
+        touching the current branch or working tree -- unlike restore(), this
+        never runs `git reset`/`git clean` and never touches memory.db or skills.
+        The current branch stays checked out; the new branch is just a pointer the
+        user can `git checkout` into themselves when ready. Deliberately
+        lightweight and git-only: the point is a cheap way to explore an alternate
+        path from history without a full, stateful rollback.
+        """
+        entry = self._resolve_entry(checkpoint_id)
+        result = _git(self.root, ["branch", branch_name, entry["git_commit"]])
+        if result.returncode != 0:
+            raise ValueError(result.stderr.strip() or f"Failed to create branch {branch_name!r}")
+        return entry
+
     def show_entry(self, checkpoint_id: str | None = None) -> dict:
         """Full detail for one checkpoint: its index metadata plus how many messages
         its conversation snapshot holds and whether memory/skills were captured.

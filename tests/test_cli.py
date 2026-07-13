@@ -293,3 +293,101 @@ def test_checkpoint_diff_no_changes(tmp_path, monkeypatch):
     result = runner.invoke(main, ["checkpoint", "diff"])
     assert result.exit_code == 0, result.output
     assert "(no changes)" in result.output
+
+
+# ---------------------------------------------------------------------------
+# checkpoint inspect / compare / branch-from (rest of Phase B)
+# ---------------------------------------------------------------------------
+
+
+def test_checkpoint_inspect_requires_a_flag(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    runner.invoke(main, ["checkpoint"])
+
+    result = runner.invoke(main, ["checkpoint", "inspect"])
+    assert result.exit_code == 0
+    assert "--memory" in result.output
+
+
+def test_checkpoint_inspect_memory_shows_captured_facts(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    from mazu.cli import _memory_db_path
+
+    store = MemoryStore(_memory_db_path(tmp_path))
+    store.add(category="decision", title="Use PostgreSQL", body="for concurrency")
+    store.close()
+
+    runner = CliRunner()
+    runner.invoke(main, ["checkpoint"])
+
+    result = runner.invoke(main, ["checkpoint", "inspect", "--memory"])
+    assert result.exit_code == 0, result.output
+    assert "Use PostgreSQL" in result.output
+
+
+def test_checkpoint_inspect_conversation_shows_captured_messages(tmp_path, monkeypatch):
+    # checkpoint inspect --conversation reads conversation.json, which is only
+    # populated with real messages via a live session -- the CLI's bare
+    # `mazu checkpoint` snapshot always passes an empty message list. Exercise the
+    # manager directly here to prove the CLI wiring formats real messages
+    # correctly, same pattern as other tests that seed data below the CLI layer.
+    monkeypatch.chdir(tmp_path)
+    from mazu.checkpoint.manager import CheckpointManager
+
+    manager = CheckpointManager(tmp_path)
+    manager.snapshot(
+        messages=[{"role": "user", "content": "hello there"}], trigger="manual"
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["checkpoint", "inspect", "--conversation"])
+    assert result.exit_code == 0, result.output
+    assert "hello there" in result.output
+
+
+def test_checkpoint_compare_shows_diff(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    runner.invoke(main, ["checkpoint"])
+    (tmp_path / "new_file.py").write_text("x")
+    runner.invoke(main, ["checkpoint"])
+
+    result = runner.invoke(main, ["checkpoint", "compare", "cp_000001", "cp_000002"])
+    assert result.exit_code == 0, result.output
+    assert "new_file.py" in result.output
+
+
+def test_checkpoint_compare_unknown_id_reports_cleanly(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    runner.invoke(main, ["checkpoint"])
+
+    result = runner.invoke(main, ["checkpoint", "compare", "cp_000001", "cp_999999"])
+    assert result.exit_code == 0
+    assert "No checkpoint found" in result.output
+
+
+def test_branch_from_creates_branch(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    runner.invoke(main, ["checkpoint"])
+
+    result = runner.invoke(main, ["branch-from", "cp_000001", "my-experiment"])
+    assert result.exit_code == 0, result.output
+    assert "my-experiment" in result.output
+
+    branches = subprocess.run(
+        ["git", "branch", "--list", "my-experiment"], cwd=tmp_path, capture_output=True, text=True
+    )
+    assert "my-experiment" in branches.stdout
+
+
+def test_branch_from_unknown_checkpoint_reports_cleanly(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    runner.invoke(main, ["checkpoint"])
+
+    result = runner.invoke(main, ["branch-from", "cp_999999", "my-experiment"])
+    assert result.exit_code == 0
+    assert "No checkpoint found" in result.output

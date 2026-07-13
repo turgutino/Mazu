@@ -366,6 +366,66 @@ def checkpoint_diff(checkpoint_id: str | None) -> None:
         click.echo("(no changes)")
 
 
+@checkpoint.command("inspect")
+@click.argument("checkpoint_id", required=False)
+@click.option("--memory", "show_memory", is_flag=True, default=False, help="Show the memory captured in this checkpoint's snapshot.")
+@click.option("--conversation", "show_conversation", is_flag=True, default=False, help="Show the conversation transcript captured in this checkpoint.")
+def checkpoint_inspect(checkpoint_id: str | None, show_memory: bool, show_conversation: bool) -> None:
+    """Show the actual content of a checkpoint's snapshot -- not just its metadata
+    (see `checkpoint show` for that). Reads straight from the frozen snapshot, not
+    the live/current state, so this reflects exactly what things looked like at
+    that point in history."""
+    if not show_memory and not show_conversation:
+        click.echo("Pass --memory and/or --conversation to choose what to show.")
+        return
+    root = Path.cwd()
+    checkpoint_manager = CheckpointManager(root)
+    try:
+        entry = checkpoint_manager.show_entry(checkpoint_id)
+    except ValueError as e:
+        click.echo(str(e))
+        return
+
+    click.echo(f"Checkpoint {entry['id']} ({entry['created_at']})\n")
+
+    if show_memory:
+        memories = checkpoint_manager.inspect_memory(entry["id"])
+        click.echo(f"Memory snapshot ({len(memories)} active row(s)):")
+        if not memories:
+            click.echo("  (none captured)")
+        for m in memories:
+            click.echo(f"  [{m['id']}] ({m['category']}) {m['title']}: {m['body']}")
+        click.echo()
+
+    if show_conversation:
+        messages = checkpoint_manager.inspect_conversation(entry["id"])
+        click.echo(f"Conversation snapshot ({len(messages)} message(s)):")
+        if not messages:
+            click.echo("  (none captured)")
+        for msg in messages:
+            content = msg["content"]
+            text = content if isinstance(content, str) else str(content)
+            preview = text if len(text) <= 200 else text[:200] + "..."
+            click.echo(f"  [{msg['role']}] {preview}")
+
+
+@checkpoint.command("compare")
+@click.argument("checkpoint_id_a")
+@click.argument("checkpoint_id_b")
+def checkpoint_compare(checkpoint_id_a: str, checkpoint_id_b: str) -> None:
+    """Diff between two checkpoints directly, not either one vs. the current
+    working tree (see `checkpoint diff` for that)."""
+    root = Path.cwd()
+    checkpoint_manager = CheckpointManager(root)
+    try:
+        entry_a, entry_b, diff = checkpoint_manager.compare(checkpoint_id_a, checkpoint_id_b)
+    except ValueError as e:
+        click.echo(str(e))
+        return
+    click.echo(f"Diff from {entry_a['id']} ({entry_a['created_at']}) to {entry_b['id']} ({entry_b['created_at']}):\n")
+    click.echo(diff if diff.strip() else "(no changes)")
+
+
 @checkpoint.command("prune")
 @click.option(
     "--keep",
@@ -406,6 +466,26 @@ def timeline() -> None:
         flags.append("skills" if entry["has_skills_snapshot"] else "no skills")
         click.echo(f"    snapshot: {', '.join(flags)}")
         click.echo()
+
+
+@main.command("branch-from")
+@click.argument("checkpoint_id")
+@click.argument("branch_name")
+def branch_from(checkpoint_id: str, branch_name: str) -> None:
+    """Create a new git branch pointing at a checkpoint's commit, without rolling
+    back or touching your current branch/working tree. Git-only -- memory and
+    skills stay as they currently are; use `mazu rollback` instead if you need
+    those restored too. Switch to the new branch yourself when ready: `git
+    checkout <branch_name>`."""
+    root = Path.cwd()
+    checkpoint_manager = CheckpointManager(root)
+    try:
+        entry = checkpoint_manager.branch_from(checkpoint_id, branch_name)
+    except ValueError as e:
+        click.echo(str(e))
+        return
+    click.echo(f"Created branch '{branch_name}' at {entry['id']} (commit {entry['git_commit'][:8]}).")
+    click.echo(f"Your current branch is unchanged. Switch with: git checkout {branch_name}")
 
 
 @main.command("usage")

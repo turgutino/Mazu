@@ -15,13 +15,13 @@ This file is split into two parts on purpose:
 - [x] `ARCHITECTURE.md` — the system-design detail split out of README, which stays focused on usage
 - [x] Clean up stray untracked files in the repo root
 
-### Phase B — Checkpoint UX
+### Phase B — Checkpoint UX ✅ done
 - [x] `mazu timeline`
 - [x] `mazu checkpoint show <id>`
 - [x] `mazu checkpoint diff <id>`
-- [ ] `mazu checkpoint inspect <id> --memory` / `--conversation` — print a snapshot's captured memory rows / conversation transcript directly, without restoring
-- [ ] `mazu checkpoint compare <id1> <id2>` — diff between two checkpoints (not just checkpoint-vs-current)
-- [ ] `mazu branch-from <id> <branch-name>` — create a git branch from a checkpoint's commit without rolling back the current one
+- [x] `mazu checkpoint inspect <id> --memory` / `--conversation` — prints a snapshot's captured memory rows / conversation transcript directly, from the frozen snapshot, without restoring
+- [x] `mazu checkpoint compare <id1> <id2>` — diff between two checkpoints directly (not checkpoint-vs-current)
+- [x] `mazu branch-from <id> <branch-name>` — creates a git branch from a checkpoint's commit; deliberately git-only (no memory/skills restore) and non-destructive (current branch/working tree untouched)
 
 ### Phase C — Memory UX
 - [ ] `mazu memory why "<query>"` — shows which memories would be retrieved and why (BM25 score, semantic score if enabled)
