@@ -61,6 +61,12 @@ class MemoryStore:
         if "embedding" not in columns:
             self.conn.execute("ALTER TABLE memories ADD COLUMN embedding TEXT")
             self.conn.commit()
+        if "retrieval_count" not in columns:
+            self.conn.execute("ALTER TABLE memories ADD COLUMN retrieval_count INTEGER NOT NULL DEFAULT 0")
+            self.conn.commit()
+        if "last_used_at" not in columns:
+            self.conn.execute("ALTER TABLE memories ADD COLUMN last_used_at TEXT")
+            self.conn.commit()
 
     def add(
         self,
@@ -156,6 +162,92 @@ class MemoryStore:
             "ORDER BY created_at DESC LIMIT ?",
             (limit,),
         ).fetchall()
+
+    def get(self, memory_id: int) -> sqlite3.Row | None:
+        return self.conn.execute("SELECT * FROM memories WHERE id = ?", (memory_id,)).fetchone()
+
+    def pin(self, memory_id: int) -> bool:
+        cur = self.conn.execute(
+            "UPDATE memories SET pinned = 1, updated_at = ? WHERE id = ?", (_now(), memory_id)
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def unpin(self, memory_id: int) -> bool:
+        cur = self.conn.execute(
+            "UPDATE memories SET pinned = 0, updated_at = ? WHERE id = ?", (_now(), memory_id)
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def edit(self, memory_id: int, title: str | None = None, body: str | None = None) -> bool:
+        """Updates title and/or body in place, leaving whichever field isn't passed
+        unchanged. Returns False if the memory doesn't exist or neither field was given.
+        """
+        if title is None and body is None:
+            return False
+        row = self.get(memory_id)
+        if row is None:
+            return False
+        new_title = title if title is not None else row["title"]
+        new_body = body if body is not None else row["body"]
+        cur = self.conn.execute(
+            "UPDATE memories SET title = ?, body = ?, updated_at = ? WHERE id = ?",
+            (new_title, new_body, _now(), memory_id),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def mark_retrieved(self, memory_ids: list[int]) -> None:
+        """Bumps retrieval_count and last_used_at for memories that were actually
+        rendered into a system prompt's context block. Not called for inspection-only
+        reads (search/list/why) -- only for real retrieval into a live session.
+        """
+        if not memory_ids:
+            return
+        now = _now()
+        self.conn.executemany(
+            "UPDATE memories SET retrieval_count = retrieval_count + 1, last_used_at = ? WHERE id = ?",
+            [(now, mid) for mid in memory_ids],
+        )
+        self.conn.commit()
+
+    def stats(self) -> dict:
+        total = self.conn.execute("SELECT COUNT(*) c FROM memories").fetchone()["c"]
+        active = self.conn.execute(
+            "SELECT COUNT(*) c FROM memories WHERE superseded_by IS NULL"
+        ).fetchone()["c"]
+        pinned = self.conn.execute(
+            "SELECT COUNT(*) c FROM memories WHERE pinned = 1 AND superseded_by IS NULL"
+        ).fetchone()["c"]
+        by_category = {
+            row["category"]: row["c"]
+            for row in self.conn.execute(
+                "SELECT category, COUNT(*) c FROM memories WHERE superseded_by IS NULL GROUP BY category"
+            )
+        }
+        by_source = {
+            row["source"]: row["c"]
+            for row in self.conn.execute(
+                "SELECT source, COUNT(*) c FROM memories WHERE superseded_by IS NULL GROUP BY source"
+            )
+        }
+        oldest = self.conn.execute(
+            "SELECT * FROM memories WHERE superseded_by IS NULL ORDER BY created_at ASC LIMIT 1"
+        ).fetchone()
+        newest = self.conn.execute(
+            "SELECT * FROM memories WHERE superseded_by IS NULL ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        return {
+            "total": total,
+            "active": active,
+            "superseded": total - active,
+            "pinned": pinned,
+            "by_category": by_category,
+            "by_source": by_source,
+            "oldest": oldest,
+            "newest": newest,
+        }
 
     def forget(self, memory_id: int) -> bool:
         cur = self.conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))

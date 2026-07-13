@@ -391,3 +391,221 @@ def test_branch_from_unknown_checkpoint_reports_cleanly(tmp_path, monkeypatch):
     result = runner.invoke(main, ["branch-from", "cp_999999", "my-experiment"])
     assert result.exit_code == 0
     assert "No checkpoint found" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Memory UX (Phase C): why / pin / unpin / edit / supersede / stats
+# ---------------------------------------------------------------------------
+
+
+def test_memory_why_shows_included_and_excluded_memories(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = MemoryStore(_memory_db_path(tmp_path))
+    store.add(category="decision", title="Use PostgreSQL", body="for the database")
+    store.add(category="decision", title="Adopted React", body="for frontend components")
+    store.close()
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["memory", "why", "what database do we use"])
+
+    assert result.exit_code == 0, result.output
+    assert "Use PostgreSQL" in result.output
+    assert "Adopted React" in result.output
+    assert "[x]" in result.output  # at least one included row
+
+
+def test_memory_why_empty_store(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(main, ["memory", "why", "anything"])
+
+    assert result.exit_code == 0
+    assert "No memories stored yet." in result.output
+
+
+def test_memory_why_marks_pinned_memory_with_its_reason(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = MemoryStore(_memory_db_path(tmp_path))
+    store.add(category="fact", title="Pinned fact", body="x", pinned=True)
+    store.close()
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["memory", "why", "unrelated query"])
+
+    assert result.exit_code == 0, result.output
+    assert "pinned" in result.output.lower()
+
+
+def test_memory_pin_and_unpin(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = MemoryStore(_memory_db_path(tmp_path))
+    memory_id = store.add(category="fact", title="A", body="a")
+    store.close()
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["memory", "pin", str(memory_id)])
+    assert result.exit_code == 0, result.output
+    assert f"Pinned memory {memory_id}" in result.output
+
+    store = MemoryStore(_memory_db_path(tmp_path))
+    assert store.get(memory_id)["pinned"] == 1
+    store.close()
+
+    result = runner.invoke(main, ["memory", "unpin", str(memory_id)])
+    assert result.exit_code == 0, result.output
+    assert f"Unpinned memory {memory_id}" in result.output
+
+    store = MemoryStore(_memory_db_path(tmp_path))
+    assert store.get(memory_id)["pinned"] == 0
+    store.close()
+
+
+def test_memory_pin_missing_id_reports_cleanly(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(main, ["memory", "pin", "9999"])
+
+    assert result.exit_code == 0
+    assert "No memory with id 9999" in result.output
+
+
+def test_memory_edit_updates_title_and_body(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = MemoryStore(_memory_db_path(tmp_path))
+    memory_id = store.add(category="fact", title="Old", body="Old body")
+    store.close()
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["memory", "edit", str(memory_id), "--title", "New", "--body", "New body"]
+    )
+    assert result.exit_code == 0, result.output
+    assert f"Updated memory {memory_id}" in result.output
+
+    store = MemoryStore(_memory_db_path(tmp_path))
+    row = store.get(memory_id)
+    assert row["title"] == "New"
+    assert row["body"] == "New body"
+    store.close()
+
+
+def test_memory_edit_without_flags_is_a_usage_error(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(main, ["memory", "edit", "1"])
+
+    assert result.exit_code != 0
+    assert "Provide --title and/or --body" in result.output
+
+
+def test_memory_edit_missing_id_reports_cleanly(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(main, ["memory", "edit", "9999", "--title", "X"])
+
+    assert result.exit_code == 0
+    assert "No memory with id 9999" in result.output
+
+
+def test_memory_supersede_retires_old_memory(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = MemoryStore(_memory_db_path(tmp_path))
+    old_id = store.add(category="decision", title="Use MySQL", body="Initial choice")
+    new_id = store.add(category="decision", title="Use PostgreSQL", body="Better fit")
+    store.close()
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["memory", "supersede", str(old_id), str(new_id)])
+    assert result.exit_code == 0, result.output
+    assert f"Memory {old_id} marked as superseded by {new_id}" in result.output
+
+    store = MemoryStore(_memory_db_path(tmp_path))
+    active_ids = {row["id"] for row in store.all_active()}
+    assert old_id not in active_ids
+    assert new_id in active_ids
+    store.close()
+
+
+def test_memory_supersede_unknown_old_id_reports_cleanly(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = MemoryStore(_memory_db_path(tmp_path))
+    new_id = store.add(category="decision", title="Use PostgreSQL", body="Better fit")
+    store.close()
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["memory", "supersede", "9999", str(new_id)])
+    assert result.exit_code == 0
+    assert "No memory with id 9999" in result.output
+
+
+def test_memory_supersede_unknown_new_id_reports_cleanly(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = MemoryStore(_memory_db_path(tmp_path))
+    old_id = store.add(category="decision", title="Use MySQL", body="Initial choice")
+    store.close()
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["memory", "supersede", str(old_id), "9999"])
+    assert result.exit_code == 0
+    assert "No memory with id 9999" in result.output
+
+
+def test_memory_stats_empty_project(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(main, ["memory", "stats"])
+
+    assert result.exit_code == 0, result.output
+    assert "Total: 0" in result.output
+
+
+def test_memory_stats_counts_by_category_and_source(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = MemoryStore(_memory_db_path(tmp_path))
+    store.add(category="decision", title="A", body="a", source="explicit")
+    store.add(category="decision", title="B", body="b", source="auto_extracted")
+    store.add(category="mistake", title="C", body="c", source="explicit", pinned=True)
+    store.close()
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["memory", "stats"])
+
+    assert result.exit_code == 0, result.output
+    assert "Total: 3" in result.output
+    assert "1 pinned" in result.output
+    assert "decision: 2" in result.output
+    assert "mistake: 1" in result.output
+    assert "explicit: 2" in result.output
+    assert "auto_extracted: 1" in result.output
+
+
+def test_memory_stats_global_flag_uses_global_store(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)  # HOME already redirected here by _git_identity fixture
+    from mazu.cli import _global_memory_db_path
+
+    store = MemoryStore(_global_memory_db_path())
+    store.add(category="user_preference", title="Name", body="Turgut")
+    store.close()
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["memory", "stats", "--global"])
+
+    assert result.exit_code == 0, result.output
+    assert "Total: 1" in result.output
+
+
+def test_memory_list_shows_retrieval_usage_after_context_build(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("MAZU_SEMANTIC_MEMORY", raising=False)
+    from mazu.memory.retrieval import build_context_block
+
+    store = MemoryStore(_memory_db_path(tmp_path))
+    store.add(category="decision", title="Use PostgreSQL", body="for the database")
+    build_context_block(store, query="what database do we use")
+    store.close()
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["memory", "list"])
+
+    assert result.exit_code == 0, result.output
+    assert "used 1x" in result.output

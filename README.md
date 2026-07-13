@@ -177,7 +177,17 @@ mazu memory forget <id>             # delete a memory by id
 mazu memory forget <id> --global
 mazu memory consolidate --dry-run   # preview near-duplicate memories that would be merged
 mazu memory consolidate             # merge them for real (nothing is deleted — see below)
+mazu memory why "<query>"           # what would be retrieved for this query, and why (score, or pinned/mistake floor)
+mazu memory pin <id>                # always include this memory in context, regardless of relevance ranking
+mazu memory unpin <id>
+mazu memory edit <id> --title "..." --body "..."   # correct a memory in place instead of forget + re-add
+mazu memory supersede <old-id> <new-id>            # mark old as replaced by new (nothing deleted, just retired)
+mazu memory stats                   # counts by category/source, pinned/superseded totals, oldest/newest
 ```
+
+Every subcommand above takes `--global` to operate on the cross-project store instead of this project's.
+
+`mazu memory why` mirrors the exact selection logic used when building a session's context block, so it's a real answer to "why didn't the agent know X" or "why did it bring up Y" — not a separate approximation. `mazu memory list` also shows how many times each memory has actually been rendered into a session's context (`used Nx, last: ...`), tracked only on real retrieval, not on inspection commands like `why` or `list` themselves.
 
 Memory categories: `decision`, `convention`, `mistake`, `task_outcome`, `fact` (all project-scoped) and `user_preference` (global — your name, language, experience level, working style; injected into every project's context automatically).
 

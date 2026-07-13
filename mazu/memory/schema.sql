@@ -13,7 +13,13 @@ CREATE TABLE IF NOT EXISTS memories (
     pinned          INTEGER NOT NULL DEFAULT 0,
     -- JSON-encoded embedding vector, NULL unless semantic search is opted into via
     -- MAZU_SEMANTIC_MEMORY (see mazu/memory/embeddings.py) at write time.
-    embedding       TEXT
+    embedding       TEXT,
+    -- Retrieval usage tracking: bumped whenever this memory is actually rendered
+    -- into a system prompt's context block (build_context_block /
+    -- build_global_context_block), not on every DB read. NULL last_used_at means
+    -- never retrieved since creation.
+    retrieval_count INTEGER NOT NULL DEFAULT 0,
+    last_used_at    TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);

@@ -23,13 +23,13 @@ This file is split into two parts on purpose:
 - [x] `mazu checkpoint compare <id1> <id2>` — diff between two checkpoints directly (not checkpoint-vs-current)
 - [x] `mazu branch-from <id> <branch-name>` — creates a git branch from a checkpoint's commit; deliberately git-only (no memory/skills restore) and non-destructive (current branch/working tree untouched)
 
-### Phase C — Memory UX
-- [ ] `mazu memory why "<query>"` — shows which memories would be retrieved and why (BM25 score, semantic score if enabled)
-- [ ] `mazu memory pin <id>` / `unpin <id>` — the `pinned` column already exists; just needs a command
-- [ ] `mazu memory stats` — counts by category/source, oldest/newest, superseded count
-- [ ] `mazu memory edit <id>` — edit an existing memory's title/body in place
-- [ ] `mazu memory supersede <old_id> <new_id>` — CLI wrapper around the `supersede()` method `remember` already uses internally
-- [ ] Track `last_used_at` / `retrieval_count` per memory (new columns + update-on-retrieval), shown in `mazu memory list`
+### Phase C — Memory UX ✅ done
+- [x] `mazu memory why "<query>"` — shows which memories would be retrieved and why (BM25 score, semantic score if enabled)
+- [x] `mazu memory pin <id>` / `unpin <id>` — the `pinned` column already exists; just needs a command
+- [x] `mazu memory stats` — counts by category/source, oldest/newest, superseded count
+- [x] `mazu memory edit <id>` — edit an existing memory's title/body in place
+- [x] `mazu memory supersede <old_id> <new_id>` — CLI wrapper around the `supersede()` method `remember` already uses internally
+- [x] Track `last_used_at` / `retrieval_count` per memory (new columns + update-on-retrieval), shown in `mazu memory list`
 
 ### Phase D — Agent Action Log
 - [ ] Persistent log of every tool call: time, tool name, input, output summary, changed files, exit code

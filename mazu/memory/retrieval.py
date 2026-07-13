@@ -20,18 +20,19 @@ CATEGORY_HEADINGS = {
 }
 
 
-def _rank_by_relevance(pool: list, query: str, limit: int) -> list:
-    """Rank the candidate pool against a query using local BM25 (zero API cost) --
+def _score_pool(pool: list, query: str) -> list[tuple]:
+    """Scores each row in `pool` against `query` with local BM25 (zero API cost),
     and, only if semantic search is opted into (MAZU_SEMANTIC_MEMORY) and both the
     query and a given memory have a stored embedding, blended with cosine
     similarity. This is what lets a memory phrased very differently from the
     current task ("the project's database is Postgres" vs. "what does this project
     use for storage") still surface -- BM25 alone requires shared vocabulary.
-    Falls back to recency order (pool is already recency-sorted) when there's no
-    query or no term overlap at all.
+    Returns a list of (row, bm25_normalized, semantic_or_None, combined) in the
+    same order as `pool`. Shared by both the actual selection logic
+    (`_rank_by_relevance`) and the inspection-only `explain_retrieval`.
     """
     if not query.strip() or not pool:
-        return pool[:limit]
+        return [(row, 0.0, None, 0.0) for row in pool]
 
     documents = [f"{row['title']} {row['body']} {row['tags'] or ''}" for row in pool]
     bm25_scores = BM25(documents).score(query)
@@ -59,11 +60,22 @@ def _rank_by_relevance(pool: list, query: str, limit: int) -> list:
             (1 - SEMANTIC_BLEND_WEIGHT) * b + SEMANTIC_BLEND_WEIGHT * s
             for b, s in zip(bm25_normalized, semantic_scores)
         ]
-    else:
-        combined = bm25_normalized
+        return list(zip(pool, bm25_normalized, semantic_scores, combined))
 
-    ranked = sorted(zip(pool, combined), key=lambda pair: pair[1], reverse=True)
-    top = [row for row, score in ranked if score > 0][:limit]
+    return list(zip(pool, bm25_normalized, [None] * len(pool), bm25_normalized))
+
+
+def _rank_by_relevance(pool: list, query: str, limit: int) -> list:
+    """Selects and orders the top `limit` candidates from `pool` for actual
+    injection into the context block. Falls back to recency order (pool is already
+    recency-sorted) when there's no query or no term overlap at all.
+    """
+    if not query.strip() or not pool:
+        return pool[:limit]
+
+    scored = _score_pool(pool, query)
+    ranked = sorted(scored, key=lambda t: t[3], reverse=True)
+    top = [row for row, _, _, combined in ranked if combined > 0][:limit]
     return top if top else pool[:limit]
 
 
@@ -106,6 +118,7 @@ def build_context_block(store: MemoryStore, query: str = "", limit: int = 15) ->
         "",
     ]
     char_count = sum(len(line) for line in lines)
+    rendered_ids: list[int] = []
 
     for category, rows in by_category.items():
         header = f"### {CATEGORY_HEADINGS.get(category, category.title())}"
@@ -117,7 +130,12 @@ def build_context_block(store: MemoryStore, query: str = "", limit: int = 15) ->
                 break
             lines.append(entry)
             char_count += len(entry)
+            rendered_ids.append(row["id"])
         lines.append("")
+
+    # Only memories that actually made it into the rendered block count as
+    # "retrieved" -- a row cut for char budget was considered but never surfaced.
+    store.mark_retrieved(rendered_ids)
 
     return "\n".join(lines).rstrip() + "\n"
 
@@ -138,11 +156,55 @@ def build_global_context_block(global_store: MemoryStore) -> str:
         "",
     ]
     char_count = sum(len(line) for line in lines)
+    rendered_ids: list[int] = []
     for row in rows:
         entry = f"- [id {row['id']}] {row['title']}: {row['body']}"
         if char_count + len(entry) > CONTEXT_CHAR_BUDGET:
             break
         lines.append(entry)
         char_count += len(entry)
+        rendered_ids.append(row["id"])
+
+    global_store.mark_retrieved(rendered_ids)
 
     return "\n".join(lines).rstrip() + "\n"
+
+
+def explain_retrieval(store: MemoryStore, query: str = "", limit: int = 15) -> list[dict]:
+    """Inspection-only mirror of build_context_block's selection logic: returns per-memory
+    scoring and inclusion decisions instead of a formatted block, and never mutates
+    retrieval stats (no mark_retrieved call) since this isn't a real retrieval into a
+    live session, just a "what would happen and why" view for `mazu memory why`.
+    """
+    floor_rows = [*store.pinned(), *store.recent_by_category("mistake", limit=3)]
+    floor_ids = {row["id"] for row in floor_rows}
+    pinned_ids = {row["id"] for row in store.pinned()}
+
+    pool = [row for row in store.all_active() if row["id"] not in floor_ids]
+    scored = _score_pool(pool, query)
+    ranked = sorted(scored, key=lambda t: t[3], reverse=True)
+
+    included_from_ranked = [row for row, _, _, combined in ranked if combined > 0][:limit]
+    if not included_from_ranked and pool:
+        included_from_ranked = pool[:limit]
+    included_ranked_ids = {row["id"] for row in included_from_ranked}
+
+    explanations = []
+    for row in floor_rows:
+        reason = "pinned" if row["id"] in pinned_ids else "recent mistake"
+        explanations.append(
+            {"row": row, "bm25": None, "semantic": None, "combined": None,
+             "included": True, "reason": reason}
+        )
+    for row, bm25, semantic, combined in ranked:
+        explanations.append(
+            {
+                "row": row,
+                "bm25": bm25,
+                "semantic": semantic,
+                "combined": combined,
+                "included": row["id"] in included_ranked_ids,
+                "reason": "ranked" if row["id"] in included_ranked_ids else "not included",
+            }
+        )
+    return explanations

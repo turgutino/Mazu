@@ -9,7 +9,12 @@ from unittest.mock import patch
 
 import pytest
 
-from mazu.memory.retrieval import _rank_by_relevance, build_context_block
+from mazu.memory.retrieval import (
+    _rank_by_relevance,
+    build_context_block,
+    build_global_context_block,
+    explain_retrieval,
+)
 from mazu.memory.store import MemoryStore
 
 
@@ -145,3 +150,115 @@ def test_build_context_block_with_semantic_enabled_and_real_stored_embedding(
         block = build_context_block(store, query="totally unrelated wording")
 
     assert "Storage engine" in block
+
+
+# ---------------------------------------------------------------------------
+# retrieval tracking (retrieval_count / last_used_at)
+# ---------------------------------------------------------------------------
+
+
+def test_build_context_block_marks_rendered_memories_as_retrieved(store: MemoryStore, monkeypatch):
+    monkeypatch.delenv("MAZU_SEMANTIC_MEMORY", raising=False)
+    memory_id = store.add(category="decision", title="Use PostgreSQL", body="for the database")
+
+    assert store.get(memory_id)["retrieval_count"] == 0
+    build_context_block(store, query="what database do we use")
+    row = store.get(memory_id)
+    assert row["retrieval_count"] == 1
+    assert row["last_used_at"] is not None
+
+
+def test_build_context_block_does_not_mark_unrendered_memories(store: MemoryStore, monkeypatch):
+    """A memory that exists but has zero relevance to the query and isn't a pinned/
+    mistake floor entry shouldn't have its retrieval stats touched -- it was never
+    actually shown to the model.
+    """
+    monkeypatch.delenv("MAZU_SEMANTIC_MEMORY", raising=False)
+    shown_id = store.add(category="decision", title="Use PostgreSQL", body="for the database")
+    unrelated_id = store.add(category="decision", title="Adopted React", body="for frontend components")
+
+    build_context_block(store, query="what database do we use")
+
+    assert store.get(shown_id)["retrieval_count"] == 1
+    assert store.get(unrelated_id)["retrieval_count"] == 0
+
+
+def test_build_context_block_empty_store_is_a_noop_for_tracking(store: MemoryStore):
+    # Must not raise even though mark_retrieved([]) is called with nothing to update.
+    block = build_context_block(store, query="anything")
+    assert block == ""
+
+
+def test_build_global_context_block_marks_retrieved(tmp_path: Path):
+    global_store = MemoryStore(tmp_path / "global.db")
+    memory_id = global_store.add(category="user_preference", title="Name", body="Turgut")
+
+    build_global_context_block(global_store)
+
+    assert global_store.get(memory_id)["retrieval_count"] == 1
+    global_store.close()
+
+
+# ---------------------------------------------------------------------------
+# explain_retrieval (mazu memory why)
+# ---------------------------------------------------------------------------
+
+
+def test_explain_retrieval_never_mutates_retrieval_stats(store: MemoryStore, monkeypatch):
+    monkeypatch.delenv("MAZU_SEMANTIC_MEMORY", raising=False)
+    memory_id = store.add(category="decision", title="Use PostgreSQL", body="for the database")
+
+    explain_retrieval(store, query="what database do we use")
+
+    assert store.get(memory_id)["retrieval_count"] == 0
+
+
+def test_explain_retrieval_marks_pinned_as_always_included(store: MemoryStore, monkeypatch):
+    monkeypatch.delenv("MAZU_SEMANTIC_MEMORY", raising=False)
+    store.add(category="fact", title="Pinned fact", body="x", pinned=True)
+
+    explanations = explain_retrieval(store, query="something completely unrelated")
+
+    pinned_entry = next(e for e in explanations if e["row"]["title"] == "Pinned fact")
+    assert pinned_entry["included"] is True
+    assert pinned_entry["reason"] == "pinned"
+
+
+def test_explain_retrieval_marks_recent_mistake_as_always_included(store: MemoryStore, monkeypatch):
+    monkeypatch.delenv("MAZU_SEMANTIC_MEMORY", raising=False)
+    store.add(category="mistake", title="Forgot to handle None", body="x")
+
+    explanations = explain_retrieval(store, query="something completely unrelated")
+
+    entry = next(e for e in explanations if e["row"]["title"] == "Forgot to handle None")
+    assert entry["included"] is True
+    assert entry["reason"] == "recent mistake"
+
+
+def test_explain_retrieval_marks_low_relevance_as_not_included(store: MemoryStore, monkeypatch):
+    monkeypatch.delenv("MAZU_SEMANTIC_MEMORY", raising=False)
+    store.add(category="decision", title="Use PostgreSQL", body="for the database")
+    store.add(category="decision", title="Use React", body="for the frontend components")
+
+    explanations = explain_retrieval(store, query="what database do we use", limit=1)
+
+    included = [e for e in explanations if e["included"]]
+    not_included = [e for e in explanations if not e["included"]]
+    assert any(e["row"]["title"] == "Use PostgreSQL" for e in included)
+    assert any(e["row"]["title"] == "Use React" for e in not_included)
+
+
+def test_explain_retrieval_reports_bm25_score(store: MemoryStore, monkeypatch):
+    monkeypatch.delenv("MAZU_SEMANTIC_MEMORY", raising=False)
+    store.add(category="decision", title="Use PostgreSQL", body="for the database")
+
+    explanations = explain_retrieval(store, query="what database do we use")
+
+    entry = next(e for e in explanations if e["row"]["title"] == "Use PostgreSQL")
+    assert entry["bm25"] is not None
+    assert entry["bm25"] > 0
+    assert entry["combined"] is not None
+
+
+def test_explain_retrieval_empty_store_returns_empty_list(store: MemoryStore):
+    assert explain_retrieval(store, query="anything") == []

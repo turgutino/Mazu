@@ -13,6 +13,7 @@ from mazu.checkpoint.manager import CheckpointManager
 from mazu.config import ensure_api_key
 from mazu.diagnostics import run_diagnostics
 from mazu.memory.consolidate import apply_consolidation, find_duplicate_clusters
+from mazu.memory.retrieval import explain_retrieval
 from mazu.memory.store import FUZZY_DUPLICATE_THRESHOLD, MemoryStore
 from mazu.skills.manager import SkillManager
 from mazu.tools.fs import make_fs_tools
@@ -575,6 +576,9 @@ def memory_list(category: str | None, use_global: bool) -> None:
         click.echo(f"       {row['body']}")
         if row["tags"]:
             click.echo(f"       tags: {row['tags']}")
+        retrieval_count = row["retrieval_count"] if "retrieval_count" in row.keys() else 0
+        if retrieval_count:
+            click.echo(f"       used {retrieval_count}x, last: {row['last_used_at']}")
 
 
 @memory.command("forget")
@@ -653,6 +657,128 @@ def memory_consolidate(threshold: float, use_global: bool, dry_run: bool) -> Non
         click.echo(f"  Kept [{entry['survivor_id']}] {entry['survivor_title']} ({entry['category']})")
         for s in entry["superseded"]:
             click.echo(f"    ← merged [{s['id']}] {s['title']}")
+
+
+@memory.command("why")
+@click.argument("query")
+@click.option("--limit", default=15, show_default=True, type=int, help="Max ranked slots (matches build_context_block's default).")
+@click.option(
+    "--global",
+    "use_global",
+    is_flag=True,
+    default=False,
+    help="Explain retrieval against the global store instead of this project's.",
+)
+def memory_why(query: str, limit: int, use_global: bool) -> None:
+    """Show which memories would be retrieved for QUERY and why (score, floor reason)."""
+    db_path = _global_memory_db_path() if use_global else _memory_db_path(Path.cwd())
+    store = MemoryStore(db_path)
+    explanations = explain_retrieval(store, query=query, limit=limit)
+    store.close()
+
+    if not explanations:
+        click.echo("No memories stored yet.")
+        return
+
+    for e in explanations:
+        row = e["row"]
+        mark = "x" if e["included"] else " "
+        if e["combined"] is None:
+            score_str = e["reason"]
+        else:
+            score_str = f"bm25={e['bm25']:.2f}"
+            if e["semantic"] is not None:
+                score_str += f" semantic={e['semantic']:.2f}"
+            score_str += f" combined={e['combined']:.2f}"
+        click.echo(f"[{mark}] [{row['id']:>4}] ({row['category']}) {row['title']} — {score_str}")
+
+
+@memory.command("pin")
+@click.argument("memory_id", type=int)
+@click.option("--global", "use_global", is_flag=True, default=False, help="Pin in the global store instead of this project's.")
+def memory_pin(memory_id: int, use_global: bool) -> None:
+    """Pin a memory so it's always included in context, regardless of relevance ranking."""
+    db_path = _global_memory_db_path() if use_global else _memory_db_path(Path.cwd())
+    store = MemoryStore(db_path)
+    ok = store.pin(memory_id)
+    store.close()
+    click.echo(f"Pinned memory {memory_id}." if ok else f"No memory with id {memory_id}.")
+
+
+@memory.command("unpin")
+@click.argument("memory_id", type=int)
+@click.option("--global", "use_global", is_flag=True, default=False, help="Unpin in the global store instead of this project's.")
+def memory_unpin(memory_id: int, use_global: bool) -> None:
+    """Unpin a memory, letting it be ranked normally again."""
+    db_path = _global_memory_db_path() if use_global else _memory_db_path(Path.cwd())
+    store = MemoryStore(db_path)
+    ok = store.unpin(memory_id)
+    store.close()
+    click.echo(f"Unpinned memory {memory_id}." if ok else f"No memory with id {memory_id}.")
+
+
+@memory.command("edit")
+@click.argument("memory_id", type=int)
+@click.option("--title", default=None, help="New title.")
+@click.option("--body", default=None, help="New body.")
+@click.option("--global", "use_global", is_flag=True, default=False, help="Edit in the global store instead of this project's.")
+def memory_edit(memory_id: int, title: str | None, body: str | None, use_global: bool) -> None:
+    """Edit a memory's title and/or body in place."""
+    if title is None and body is None:
+        raise click.UsageError("Provide --title and/or --body to edit.")
+    db_path = _global_memory_db_path() if use_global else _memory_db_path(Path.cwd())
+    store = MemoryStore(db_path)
+    ok = store.edit(memory_id, title=title, body=body)
+    store.close()
+    click.echo(f"Updated memory {memory_id}." if ok else f"No memory with id {memory_id}.")
+
+
+@memory.command("supersede")
+@click.argument("old_id", type=int)
+@click.argument("new_id", type=int)
+@click.option("--global", "use_global", is_flag=True, default=False, help="Supersede within the global store instead of this project's.")
+def memory_supersede(old_id: int, new_id: int, use_global: bool) -> None:
+    """Mark OLD_ID as replaced by NEW_ID -- retires it from context/list without deleting it."""
+    db_path = _global_memory_db_path() if use_global else _memory_db_path(Path.cwd())
+    store = MemoryStore(db_path)
+    if store.get(old_id) is None:
+        store.close()
+        click.echo(f"No memory with id {old_id}.")
+        return
+    if store.get(new_id) is None:
+        store.close()
+        click.echo(f"No memory with id {new_id}.")
+        return
+    ok = store.supersede(old_id, new_id)
+    store.close()
+    click.echo(f"Memory {old_id} marked as superseded by {new_id}." if ok else f"Failed to supersede {old_id}.")
+
+
+@memory.command("stats")
+@click.option("--global", "use_global", is_flag=True, default=False, help="Show stats for the global store instead of this project's.")
+def memory_stats(use_global: bool) -> None:
+    """Summarize memory counts by category/source, plus oldest/newest and superseded count."""
+    db_path = _global_memory_db_path() if use_global else _memory_db_path(Path.cwd())
+    store = MemoryStore(db_path)
+    stats = store.stats()
+    store.close()
+
+    click.echo(
+        f"Total: {stats['total']} ({stats['active']} active, "
+        f"{stats['superseded']} superseded, {stats['pinned']} pinned)"
+    )
+    if stats["by_category"]:
+        click.echo("\nBy category:")
+        for category, count in sorted(stats["by_category"].items()):
+            click.echo(f"  {category}: {count}")
+    if stats["by_source"]:
+        click.echo("\nBy source:")
+        for source, count in sorted(stats["by_source"].items()):
+            click.echo(f"  {source}: {count}")
+    if stats["oldest"]:
+        click.echo(f"\nOldest: [{stats['oldest']['id']}] {stats['oldest']['title']} ({stats['oldest']['created_at']})")
+    if stats["newest"]:
+        click.echo(f"Newest: [{stats['newest']['id']}] {stats['newest']['title']} ({stats['newest']['created_at']})")
 
 
 @main.group()
