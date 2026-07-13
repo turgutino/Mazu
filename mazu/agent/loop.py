@@ -54,7 +54,7 @@ def run_chat_loop(
                 continue
 
             if user_input == "/checkpoint":
-                _handle_checkpoint(checkpoint_manager, messages)
+                _handle_checkpoint(checkpoint_manager, messages, session_id)
                 continue
 
             if user_input == "/rollback" or user_input.startswith("/rollback "):
@@ -97,11 +97,13 @@ def run_chat_loop(
             action_log_store.close()
 
 
-def _handle_checkpoint(checkpoint_manager: CheckpointManager | None, messages: list[dict]) -> None:
+def _handle_checkpoint(
+    checkpoint_manager: CheckpointManager | None, messages: list[dict], session_id: str | None = None
+) -> None:
     if checkpoint_manager is None:
         print("Checkpointing is not available.")
         return
-    entry = checkpoint_manager.snapshot(messages, trigger="manual")
+    entry = checkpoint_manager.snapshot(messages, trigger="manual", session_id=session_id)
     print(f"[checkpoint] {entry['id']} saved (commit {entry['git_commit'][:8]})")
 
 

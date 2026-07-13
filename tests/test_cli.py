@@ -12,8 +12,17 @@ from click.testing import CliRunner
 import mazu
 import mazu.cli as cli_module
 from mazu.action_log.store import ActionLogStore
-from mazu.cli import _action_log_db_path, _memory_db_path, _parse_shell_allowlist, _usage_db_path, main
+from mazu.checkpoint.manager import CheckpointManager
+from mazu.cli import (
+    _action_log_db_path,
+    _memory_db_path,
+    _parse_shell_allowlist,
+    _runs_db_path,
+    _usage_db_path,
+    main,
+)
 from mazu.memory.store import MemoryStore
+from mazu.runs.store import RunStore
 from mazu.usage.store import UsageStore
 
 
@@ -788,3 +797,120 @@ def test_run_help_documents_dry_run_and_shell_allowlist():
     assert result.exit_code == 0
     assert "--dry-run" in result.output
     assert "--shell-allowlist" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Better Autonomous Runs (Phase F): mazu run --resume, mazu runs
+# ---------------------------------------------------------------------------
+
+
+def test_run_without_task_or_resume_is_a_usage_error(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(main, ["run"])
+
+    assert result.exit_code != 0
+    assert "Provide a TASK" in result.output
+
+
+def test_run_with_both_task_and_resume_is_a_usage_error(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(main, ["run", "do something", "--resume", "r1"])
+
+    assert result.exit_code != 0
+    assert "not both" in result.output
+
+
+def test_run_resume_unknown_run_id_reports_cleanly(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(main, ["run", "--resume", "nope"])
+
+    assert result.exit_code == 0
+    assert "No run found with id nope." in result.output
+
+
+def test_run_resume_with_no_checkpoint_reports_cleanly(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run_store = RunStore(_runs_db_path(tmp_path))
+    run_store.start("r1", "do something", "deepseek:deepseek-chat", 15, 1, False, None, None, False)
+    run_store.close()
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["run", "--resume", "r1"])
+
+    assert result.exit_code == 0
+    assert "No checkpoint found for run r1" in result.output
+
+
+def test_run_resume_recovers_stored_config_and_reaches_run_autonomous(tmp_path, monkeypatch):
+    import subprocess
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    subprocess.run(["git", "config", "--global", "user.email", "test@example.com"])
+    subprocess.run(["git", "config", "--global", "user.name", "Test"])
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-fake")
+
+    run_store = RunStore(_runs_db_path(tmp_path))
+    run_store.start(
+        "r1", "original task", "deepseek:deepseek-chat", 8, 2, True, ["git", "npm"], 1.5, False
+    )
+    run_store.close()
+
+    checkpoint_manager = CheckpointManager(tmp_path)
+    checkpoint_manager.snapshot(
+        messages=[{"role": "user", "content": "original task"}],
+        trigger="auto_after_tool_round",
+        session_id="r1",
+    )
+
+    captured = {}
+
+    def _fake_run_autonomous(registry, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(cli_module, "run_autonomous", _fake_run_autonomous)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["run", "--resume", "r1"])
+
+    assert result.exit_code == 0, result.output
+    assert captured["task"] == "original task"
+    assert captured["model"] == "deepseek:deepseek-chat"
+    assert captured["max_steps"] == 8
+    assert captured["checkpoint_every"] == 2
+    assert captured["allow_shell"] is True
+    assert captured["shell_allowlist"] == ["git", "npm"]
+    assert captured["max_cost"] == 1.5
+    assert captured["dry_run"] is False
+    assert captured["session_id"] == "r1"
+    assert captured["resume_messages"] == [{"role": "user", "content": "original task"}]
+    assert "Resuming run r1" in result.output
+
+
+def test_runs_empty_project(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(main, ["runs"])
+
+    assert result.exit_code == 0
+    assert "No runs recorded yet." in result.output
+
+
+def test_runs_lists_recorded_runs(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run_store = RunStore(_runs_db_path(tmp_path))
+    run_store.start("r1", "do something", "deepseek:deepseek-chat", 15, 1, False, None, None, False)
+    run_store.finish("r1", status="completed", stop_reason="end_turn", memories_saved=1)
+    run_store.close()
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["runs"])
+
+    assert result.exit_code == 0, result.output
+    assert "r1" in result.output
+    assert "completed" in result.output
+    assert "end_turn" in result.output

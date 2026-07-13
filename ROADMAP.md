@@ -41,10 +41,10 @@ This file is split into two parts on purpose:
 - [x] Shell command allowlist mode (opt-in, alongside the existing denylist) — `--shell-allowlist` on both `mazu chat` and `mazu run`; the denylist is a hard backstop that always applies on top, an allowlist entry can't rescue a denylisted command
 - [x] Clearer explanation text when a command is blocked — each denylist rule now carries a human-readable reason ("elevates privileges via sudo") instead of a generic "matches the safety denylist"
 
-### Phase F — Better Autonomous Runs
-- [ ] Run id system (already have session_id; formalize as a first-class concept in `mazu run`)
-- [ ] `mazu run resume <run_id>`
-- [ ] Structured end-of-run report: files changed, memories saved, checkpoints created, errors hit
+### Phase F — Better Autonomous Runs ✅ done
+- [x] Run id system — new `RunStore` (`.mazu/runs.db`) formalizes `session_id` as a first-class "run": config, live progress, status, stop reason; `mazu runs` lists them
+- [x] `mazu run --resume <run_id>` (adapted from `mazu run resume <run_id>` — Click's Group/positional-argument handling makes a `resume` subcommand ambiguous against a free-text TASK argument; a flag on the existing `run` command is unambiguous and equally discoverable via `--help`). Resumes from the run's last checkpoint, reusing its original task/model/options exactly
+- [x] Structured end-of-run report: files changed, checkpoints created, memories saved, tool errors — printed at the end of every `mazu run` (fresh or resumed), computed from `ActionLogStore`/`RunStore` rather than duplicated bookkeeping
 
 ### Phase G — Provider Layer
 - [ ] Model capability table (streaming support, tool support, context window, approximate cost) surfaced somewhere inspectable (`mazu doctor` or a new command)

@@ -9,10 +9,46 @@ from mazu.llm.client import _split_model, default_model, run_turn, summarize_usa
 from mazu.llm.errors import MazuAPIError, MazuContextLengthError
 from mazu.llm.pricing import estimate_cost
 from mazu.memory.store import MemoryStore
+from mazu.runs.store import RunStore
 from mazu.skills.manager import SkillManager
 from mazu.tools.registry import ToolRegistry
 from mazu.tools.shell import denylist_reason, is_allowed_by_shell_allowlist
 from mazu.usage.store import UsageStore
+
+
+def _build_run_report(action_log_store: ActionLogStore | None, session_id: str) -> dict:
+    if action_log_store is None:
+        return {"files_changed": [], "tool_error_count": 0, "tool_call_count": 0}
+    actions = action_log_store.session_actions(session_id)
+    files_changed = sorted({a["changed_file"] for a in actions if a["changed_file"]})
+    tool_error_count = sum(1 for a in actions if a["outcome"] == "error")
+    return {
+        "files_changed": files_changed,
+        "tool_error_count": tool_error_count,
+        "tool_call_count": len(actions),
+    }
+
+
+def _print_run_report(
+    session_id: str,
+    stop_reason: str | None,
+    step: int,
+    max_steps: int,
+    checkpoints_created: int,
+    memories_saved: int,
+    report: dict,
+    dry_run: bool,
+) -> None:
+    header = "=== Dry-run report (nothing was actually changed) ===" if dry_run else "=== Run report ==="
+    print(f"\n{header}")
+    print(f"Session: {session_id}")
+    print(f"Stop reason: {stop_reason or 'unknown'}")
+    print(f"Steps: {step}/{max_steps}")
+    files_label = "Files that would change" if dry_run else "Files changed"
+    print(f"{files_label}: {', '.join(report['files_changed']) if report['files_changed'] else '(none)'}")
+    print(f"Checkpoints created: {checkpoints_created}")
+    print(f"Memories saved: {memories_saved}")
+    print(f"Tool errors: {report['tool_error_count']}")
 
 
 def run_autonomous(
@@ -33,6 +69,8 @@ def run_autonomous(
     action_log_store: ActionLogStore | None = None,
     shell_allowlist: list[str] | None = None,
     dry_run: bool = False,
+    run_store: RunStore | None = None,
+    resume_messages: list[dict] | None = None,
 ) -> None:
     # The clean-baseline requirement exists so a real run's checkpoints are
     # meaningful diffs against a known-good starting point. A dry run never writes
@@ -46,8 +84,16 @@ def run_autonomous(
         )
         return
 
-    if memory_store is not None:
-        memory_store.start_session(session_id)
+    is_resume = resume_messages is not None
+
+    # A resumed run reuses the SAME session_id (and therefore the same `sessions` row
+    # MemoryStore already has for it) -- start_session()'s INSERT would violate that
+    # row's primary key and crash. run_store.start() is skipped the same way: the
+    # original row already describes this run's config; a resume just keeps writing
+    # progress into it via update_progress()/finish() below.
+    if not is_resume:
+        if memory_store is not None:
+            memory_store.start_session(session_id)
     system_prompt = build_system_prompt(
         memory_store, skill_manager, query=task, global_memory_store=global_memory_store
     )
@@ -61,14 +107,21 @@ def run_autonomous(
             "enforced for this model and will be ignored."
         )
 
-    messages: list[dict] = [{"role": "user", "content": task}]
+    if not is_resume and run_store is not None:
+        run_store.start(
+            session_id, task, resolved_model, max_steps, checkpoint_every, allow_shell,
+            shell_allowlist, max_cost, dry_run,
+        )
+
+    messages: list[dict] = resume_messages if is_resume else [{"role": "user", "content": task}]
     print_banner()
     print(f"model: {resolved_model}")
     print(
         f"run — task: {task}\n"
         f"max-steps={max_steps} checkpoint-every={checkpoint_every} allow-shell={allow_shell}"
         f"{f' max-cost=${max_cost:.2f}' if max_cost is not None and cost_trackable else ''}"
-        f"{' [DRY RUN — no files will be written, no commands will be run, no checkpoints will be created]' if dry_run else ''}\n"
+        f"{' [DRY RUN — no files will be written, no commands will be run, no checkpoints will be created]' if dry_run else ''}"
+        f"{f' [RESUMED session {session_id}, {len(messages)} prior message(s)]' if is_resume else ''}\n"
     )
 
     step = 0
@@ -76,6 +129,8 @@ def run_autonomous(
     total_in = 0
     total_out = 0
     total_cost = 0.0
+    checkpoints_created = 0
+    stop_reason: str | None = None
     try:
         while step < max_steps:
             step += 1
@@ -106,6 +161,7 @@ def run_autonomous(
                             f"\nStopping: {max_consecutive_failures} consecutive failures "
                             "(including API errors)."
                         )
+                        stop_reason = "consecutive_api_failures"
                         break
                     continue
 
@@ -136,6 +192,7 @@ def run_autonomous(
 
                 if response.stop_reason != "tool_use":
                     print("\nTask complete (model signaled end_turn).")
+                    stop_reason = "end_turn"
                     break
 
                 if max_cost is not None and cost_trackable and total_cost >= max_cost:
@@ -143,6 +200,7 @@ def run_autonomous(
                         f"\nStopping: estimated cost ~${total_cost:.4f} reached the "
                         f"--max-cost limit (${max_cost:.2f})."
                     )
+                    stop_reason = "max_cost"
                     break
 
                 tool_results, round_failed = _execute_round(
@@ -153,33 +211,50 @@ def run_autonomous(
                 consecutive_failures = consecutive_failures + 1 if round_failed else 0
                 if consecutive_failures >= max_consecutive_failures:
                     print(f"\nStopping: {max_consecutive_failures} consecutive tool failures.")
+                    stop_reason = "consecutive_tool_failures"
                     break
 
                 if not dry_run and step % checkpoint_every == 0:
                     summary = text_blocks[0][:100] if text_blocks else f"step {step}"
                     entry = checkpoint_manager.snapshot(
-                        messages, trigger="auto_after_tool_round", summary=summary
+                        messages, trigger="auto_after_tool_round", summary=summary, session_id=session_id
                     )
                     print(f"[checkpoint {entry['id']} @ {entry['git_commit'][:8]}]")
+                    checkpoints_created += 1
+                    if run_store is not None:
+                        run_store.update_progress(session_id, step, checkpoint_id=entry["id"])
             except KeyboardInterrupt:
                 if dry_run:
                     # Nothing was actually written, so there's nothing to preview a
                     # rollback of and no live conversation state to preserve across
                     # a restore -- just stop, matching the "no side effects" contract.
+                    stop_reason = "interrupted"
                     break
                 if not _handle_interrupt(checkpoint_manager, messages):
+                    stop_reason = "interrupted"
                     break
         else:
             print(f"\nStopped: reached max-steps ({max_steps}).")
+            stop_reason = "max_steps"
     finally:
+        memories_saved = 0
         if memory_store is not None:
-            finalize_session(memory_store, session_id, messages, model=model)
+            memories_saved = finalize_session(memory_store, session_id, messages, model=model)
         if global_memory_store is not None:
             global_memory_store.close()
+        if run_store is not None:
+            status = "completed" if stop_reason == "end_turn" else "stopped"
+            run_store.finish(session_id, status=status, stop_reason=stop_reason or "unknown", memories_saved=memories_saved)
+        report = _build_run_report(action_log_store, session_id)
+        _print_run_report(
+            session_id, stop_reason, step, max_steps, checkpoints_created, memories_saved, report, dry_run
+        )
         if usage_store is not None:
             usage_store.close()
         if action_log_store is not None:
             action_log_store.close()
+        if run_store is not None:
+            run_store.close()
 
 
 def _execute_round(

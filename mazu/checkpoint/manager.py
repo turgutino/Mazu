@@ -65,7 +65,9 @@ class CheckpointManager:
         result = _git(self.root, ["status", "--porcelain"])
         return bool(result.stdout.strip())
 
-    def snapshot(self, messages: list[dict], trigger: str, summary: str = "") -> dict:
+    def snapshot(
+        self, messages: list[dict], trigger: str, summary: str = "", session_id: str | None = None
+    ) -> dict:
         self.ensure_git_repo()
         _git(self.root, ["add", "-A"])
         commit_msg = f"mazu checkpoint: {summary or trigger}"
@@ -99,10 +101,24 @@ class CheckpointManager:
             "git_commit": commit_hash,
             "trigger": trigger,
             "summary": summary or trigger,
+            # Optional and additive -- older index entries simply lack this key
+            # (.get("session_id") returns None for them). Lets a `mazu run` be
+            # resumed from its own last checkpoint via latest_for_session() below,
+            # without needing a separate session-to-checkpoint mapping file.
+            "session_id": session_id,
         }
         self.index.append(entry)
         self.prune()
         return entry
+
+    def latest_for_session(self, session_id: str) -> dict | None:
+        """The most recent checkpoint recorded under a given session/run id, or None
+        if that session never checkpointed (e.g. a dry run, which never snapshots, or
+        a session that ended before its first checkpoint-every boundary)."""
+        matches = [e for e in self.index.load() if e.get("session_id") == session_id]
+        if not matches:
+            return None
+        return max(matches, key=lambda e: e["step"])
 
     def prune(self, keep_last: int | None = None) -> int:
         """Deletes on-disk snapshot data (memory.db/skills/conversation.json copies)

@@ -146,6 +146,30 @@ mazu run "refactor the auth module to use the new session API" --dry-run
 
 `--dry-run` runs the task loop for real — the model still reasons, plans, and calls tools — but `write_file`/`edit_file`/`run_shell` report what they *would* do (`[dry-run] Would write 340 bytes to auth.py`) instead of touching disk or a shell. Read-only tools (`read_file`, `list_dir`, `glob_files`, `recall`) still run for real, so the model's plan is grounded in the actual project, not a guess. No checkpoints are created (nothing changed to snapshot), and the usual clean-working-tree requirement is waived, since a preview has no risk of corrupting a checkpoint baseline. Everything the plan would have done is still visible afterward via `mazu log show <session_id>`.
 
+#### Run reports & resuming
+
+Every `mazu run` ends with a structured report — not just scrollback you have to read back through:
+
+```
+=== Run report ===
+Session: 3f2b1a9c-...
+Stop reason: max_steps
+Steps: 15/15
+Files changed: auth.py, session.py, tests/test_auth.py
+Checkpoints created: 15
+Memories saved: 2
+Tool errors: 0
+```
+
+`mazu runs` lists recent invocations (id, status, stop reason, step progress) — this is what gives you the id to act on next:
+
+```bash
+mazu runs                        # id, status, stop reason, steps, checkpoints -- across every mazu run
+mazu run --resume <run_id>       # continue a run that stopped at --max-steps, hit --max-cost, or was interrupted
+```
+
+`--resume` picks up from that run's *last checkpoint* — not from scratch — reusing its original task, model, and options exactly (other flags passed alongside `--resume` are ignored, to avoid a confusing "which value actually won" situation). It's for the run that stopped short of finishing, not a substitute for `mazu chat`'s open-ended conversation. A run that never checkpointed (a `--dry-run`, or one that failed before its first `--checkpoint-every` boundary) has nothing to resume from and says so plainly instead of guessing.
+
 ### Checkpoints & rollback
 
 ```bash

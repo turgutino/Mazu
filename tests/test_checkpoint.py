@@ -400,3 +400,50 @@ def test_branch_from_unknown_checkpoint_raises(project: Path):
     manager.ensure_git_repo()
     with pytest.raises(ValueError):
         manager.branch_from("cp_999999", "my-experiment")
+
+
+# ---------------------------------------------------------------------------
+# session_id tracking + latest_for_session (Phase F: run resume)
+# ---------------------------------------------------------------------------
+
+
+def test_snapshot_stores_session_id_in_the_entry(project: Path):
+    manager = CheckpointManager(project)
+    entry = manager.snapshot(messages=[], trigger="manual", session_id="run-1")
+    assert entry["session_id"] == "run-1"
+
+
+def test_snapshot_without_session_id_stores_none(project: Path):
+    manager = CheckpointManager(project)
+    entry = manager.snapshot(messages=[], trigger="manual")
+    assert entry["session_id"] is None
+
+
+def test_latest_for_session_returns_the_highest_step_match(project: Path):
+    manager = CheckpointManager(project)
+    manager.snapshot(messages=[{"n": 1}], trigger="manual", session_id="run-1")
+    second = manager.snapshot(messages=[{"n": 2}], trigger="manual", session_id="run-1")
+    manager.snapshot(messages=[{"n": 3}], trigger="manual", session_id="run-2")
+
+    latest = manager.latest_for_session("run-1")
+    assert latest["id"] == second["id"]
+
+
+def test_latest_for_session_ignores_other_sessions(project: Path):
+    manager = CheckpointManager(project)
+    manager.snapshot(messages=[], trigger="manual", session_id="run-1")
+
+    assert manager.latest_for_session("run-2") is None
+
+
+def test_latest_for_session_ignores_checkpoints_with_no_session_id(project: Path):
+    manager = CheckpointManager(project)
+    manager.snapshot(messages=[], trigger="manual")  # no session_id, e.g. a manual chat checkpoint
+
+    assert manager.latest_for_session("run-1") is None
+
+
+def test_latest_for_session_no_checkpoints_at_all_returns_none(project: Path):
+    manager = CheckpointManager(project)
+    manager.ensure_git_repo()
+    assert manager.latest_for_session("run-1") is None

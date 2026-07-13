@@ -16,6 +16,7 @@ from mazu.diagnostics import run_diagnostics
 from mazu.memory.consolidate import apply_consolidation, find_duplicate_clusters
 from mazu.memory.retrieval import explain_retrieval
 from mazu.memory.store import FUZZY_DUPLICATE_THRESHOLD, MemoryStore
+from mazu.runs.store import RunStore
 from mazu.skills.manager import SkillManager
 from mazu.tools.fs import make_fs_tools
 from mazu.tools.memory_tools import make_memory_tools
@@ -53,6 +54,12 @@ def _action_log_db_path(root: Path) -> Path:
     # do in this project" is a per-project question, and correlates with checkpoints
     # and project memory writes that are themselves project-scoped.
     return _mazu_dir(root) / "action_log.db"
+
+
+def _runs_db_path(root: Path) -> Path:
+    # Project-scoped like memory.db/action_log.db -- a run's id is a session_id, and
+    # session-scoped state is per-project throughout Mazu.
+    return _mazu_dir(root) / "runs.db"
 
 
 def _usage_db_path() -> Path:
@@ -203,7 +210,7 @@ def chat(model: str | None, shell_allowlist: str | None) -> None:
 
 
 @main.command()
-@click.argument("task")
+@click.argument("task", required=False)
 @click.option("--max-steps", default=15, show_default=True, help="Stop after this many tool-use rounds.")
 @click.option(
     "--checkpoint-every", default=1, show_default=True, help="Snapshot every N rounds."
@@ -244,9 +251,18 @@ def chat(model: str | None, shell_allowlist: str | None) -> None:
     "checkpoints. Read-only tools (read_file, list_dir, glob_files, recall) still run for "
     "real so the model can gather real information while planning.",
 )
+@click.option(
+    "--resume",
+    "resume_run_id",
+    default=None,
+    help="Resume an earlier run by its id (shown in the end-of-run report, or via `mazu "
+    "runs`), continuing from its last checkpoint's conversation state. Reuses that run's "
+    "original task/model/options exactly -- other flags on this invocation are ignored. "
+    "Mutually exclusive with passing a new TASK.",
+)
 @click.option("--model", default=None, help="Override the model.")
 def run(
-    task: str,
+    task: str | None,
     max_steps: int,
     checkpoint_every: int,
     allow_shell: bool,
@@ -254,21 +270,62 @@ def run(
     max_cost: float | None,
     shell_allowlist: str | None,
     dry_run: bool,
+    resume_run_id: str | None,
     model: str | None,
 ) -> None:
     """Run a task autonomously (multi-step, unattended), checkpointing along the way."""
-    ensure_api_key(model)
     root = Path.cwd()
     _ensure_gitignore(root)
+    checkpoint_kwargs = {"retention": keep_checkpoints} if keep_checkpoints is not None else {}
+    checkpoint_manager = CheckpointManager(root, **checkpoint_kwargs)
+    run_store = RunStore(_runs_db_path(root))
+
+    resume_messages = None
+    if resume_run_id is not None:
+        if task is not None:
+            run_store.close()
+            raise click.UsageError("Pass either a new TASK or --resume <run_id>, not both.")
+        run_row = run_store.get(resume_run_id)
+        if run_row is None:
+            run_store.close()
+            click.echo(f"No run found with id {resume_run_id}.")
+            return
+        checkpoint_entry = checkpoint_manager.latest_for_session(resume_run_id)
+        if checkpoint_entry is None:
+            run_store.close()
+            click.echo(
+                f"No checkpoint found for run {resume_run_id} -- nothing to resume from "
+                "(a dry run never checkpoints, and a run that failed before its first "
+                "checkpoint-every boundary has no saved state either)."
+            )
+            return
+        resume_messages = checkpoint_manager.inspect_conversation(checkpoint_entry["id"])
+        task = run_row["task"]
+        model = run_row["model"]
+        max_steps = run_row["max_steps"]
+        checkpoint_every = run_row["checkpoint_every"]
+        allow_shell = bool(run_row["allow_shell"])
+        shell_allowlist = run_row["shell_allowlist"]
+        max_cost = run_row["max_cost"]
+        dry_run = bool(run_row["dry_run"])
+        click.echo(
+            f"Resuming run {resume_run_id} from {checkpoint_entry['id']} "
+            f"({len(resume_messages)} prior message(s)). Using this run's original config: "
+            f"model={model} max-steps={max_steps} checkpoint-every={checkpoint_every} "
+            f"allow-shell={allow_shell} dry-run={dry_run}."
+        )
+    elif task is None:
+        run_store.close()
+        raise click.UsageError("Provide a TASK, or use --resume <run_id> to continue an earlier run.")
+
+    ensure_api_key(model)
 
     memory_store = MemoryStore(_memory_db_path(root))
     global_memory_store = MemoryStore(_global_memory_db_path())
     skill_manager = SkillManager(root)
-    checkpoint_kwargs = {"retention": keep_checkpoints} if keep_checkpoints is not None else {}
-    checkpoint_manager = CheckpointManager(root, **checkpoint_kwargs)
     usage_store = UsageStore(_usage_db_path())
     action_log_store = ActionLogStore(_action_log_db_path(root))
-    session_id = str(uuid.uuid4())
+    session_id = resume_run_id if resume_run_id is not None else str(uuid.uuid4())
 
     registry = _build_registry(
         root, memory_store, global_memory_store, skill_manager, session_id, dry_run=dry_run
@@ -291,7 +348,29 @@ def run(
         action_log_store=action_log_store,
         shell_allowlist=_parse_shell_allowlist(shell_allowlist),
         dry_run=dry_run,
+        run_store=run_store,
+        resume_messages=resume_messages,
     )
+
+
+@main.command("runs")
+@click.option("--limit", default=20, show_default=True, type=int)
+def runs_cmd(limit: int) -> None:
+    """List recent `mazu run` invocations: id, status, stop reason, step progress."""
+    root = Path.cwd()
+    store = RunStore(_runs_db_path(root))
+    rows = store.list_runs(limit=limit)
+    store.close()
+    if not rows:
+        click.echo("No runs recorded yet.")
+        return
+    for r in rows:
+        dry_marker = " [dry-run]" if r["dry_run"] else ""
+        click.echo(
+            f"{r['id']}  [{r['status']}]{dry_marker}  stop: {r['stop_reason'] or '-'}  "
+            f"step {r['last_step']}/{r['max_steps']}  checkpoints: {r['checkpoints_created']}  "
+            f"{r['started_at']}"
+        )
 
 
 DEFAULT_COUNCIL_MODELS = "anthropic:claude-sonnet-5,anthropic:claude-opus-4-8"

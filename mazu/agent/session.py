@@ -4,11 +4,12 @@ from mazu.memory.store import MemoryStore
 
 def finalize_session(
     memory_store: MemoryStore, session_id: str, messages: list[dict], model: str | None = None
-) -> None:
+) -> int:
     """Runs once at the end of a session: the cheap-model safety net that catches
     whatever the agent forgot to `remember` explicitly during the conversation.
     `model` should be the model the session actually used, so extraction stays on the
-    same provider/API key rather than assuming Anthropic.
+    same provider/API key rather than assuming Anthropic. Returns the number of
+    memories actually inserted (post-dedup), for callers building an end-of-run report.
     """
     try:
         extracted = extract_memories(messages, model=model)
@@ -46,3 +47,4 @@ def finalize_session(
     summary = extracted[0]["title"] if extracted else ""
     memory_store.end_session(session_id, task_summary=summary)
     memory_store.close()
+    return inserted
