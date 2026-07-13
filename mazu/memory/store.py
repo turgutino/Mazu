@@ -3,6 +3,8 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
+from mazu.memory.embeddings import serialize_embedding
+
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
 _WORD_RE = re.compile(r"[a-zA-Z0-9]+")
@@ -45,6 +47,20 @@ class MemoryStore:
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA_PATH.read_text())
         self.conn.commit()
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Additive-only migration for DBs created before a given column existed.
+        CREATE TABLE IF NOT EXISTS (above) only applies the current schema to brand
+        new databases -- an existing one (like anyone's real .mazu/memory.db or
+        ~/.mazu/global_memory.db from before this column existed) needs an explicit
+        ALTER TABLE, or every subsequent INSERT/SELECT referencing `embedding` would
+        fail against it.
+        """
+        columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(memories)")}
+        if "embedding" not in columns:
+            self.conn.execute("ALTER TABLE memories ADD COLUMN embedding TEXT")
+            self.conn.commit()
 
     def add(
         self,
@@ -55,13 +71,15 @@ class MemoryStore:
         source: str = "explicit",
         session_id: str | None = None,
         pinned: bool = False,
+        embedding: list[float] | None = None,
     ) -> int:
         now = _now()
+        embedding_json = serialize_embedding(embedding) if embedding is not None else None
         cur = self.conn.execute(
             "INSERT INTO memories "
-            "(created_at, updated_at, category, title, body, tags, source, session_id, pinned) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (now, now, category, title, body, tags, source, session_id, int(pinned)),
+            "(created_at, updated_at, category, title, body, tags, source, session_id, pinned, embedding) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (now, now, category, title, body, tags, source, session_id, int(pinned), embedding_json),
         )
         self.conn.commit()
         return cur.lastrowid

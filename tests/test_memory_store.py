@@ -129,3 +129,64 @@ def test_all_active_excludes_superseded(store: MemoryStore):
 
     active_titles = {row["title"] for row in store.all_active()}
     assert active_titles == {"New"}
+
+
+# ---------------------------------------------------------------------------
+# embedding storage + migration
+# ---------------------------------------------------------------------------
+
+
+def test_add_with_embedding_roundtrips_through_search(store: MemoryStore):
+    from mazu.memory.embeddings import deserialize_embedding
+
+    vector = [0.1, -0.2, 0.3]
+    store.add(category="fact", title="Test", body="x", embedding=vector)
+
+    row = store.search()[0]
+    assert deserialize_embedding(row["embedding"]) == vector
+
+
+def test_add_without_embedding_leaves_column_null(store: MemoryStore):
+    store.add(category="fact", title="Test", body="x")
+    row = store.search()[0]
+    assert row["embedding"] is None
+
+
+def test_migration_adds_embedding_column_to_pre_existing_db(tmp_path: Path):
+    import sqlite3
+
+    db_path = tmp_path / "old_memory.db"
+    # Simulate a database created before the `embedding` column existed: run only
+    # the pre-migration schema (everything except the new column) directly.
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE memories (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at      TEXT NOT NULL,
+            updated_at      TEXT NOT NULL,
+            category        TEXT NOT NULL,
+            title           TEXT NOT NULL,
+            body            TEXT NOT NULL,
+            tags            TEXT,
+            source          TEXT NOT NULL,
+            session_id      TEXT,
+            relevance_score REAL NOT NULL DEFAULT 1.0,
+            superseded_by   INTEGER REFERENCES memories(id),
+            pinned          INTEGER NOT NULL DEFAULT 0
+        );
+        INSERT INTO memories (created_at, updated_at, category, title, body, source)
+        VALUES ('2024-01-01', '2024-01-01', 'fact', 'Pre-existing memory', 'body text', 'explicit');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    # Opening with MemoryStore must migrate the column in without losing the
+    # pre-existing row.
+    store = MemoryStore(db_path)
+    rows = store.all_active()
+    assert len(rows) == 1
+    assert rows[0]["title"] == "Pre-existing memory"
+    assert rows[0]["embedding"] is None  # column exists now, just empty for old rows
+    store.close()

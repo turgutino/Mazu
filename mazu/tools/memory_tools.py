@@ -1,3 +1,4 @@
+from mazu.memory.embeddings import embed_text
 from mazu.memory.store import MemoryStore
 from mazu.tools.base import Tool, ToolResult
 
@@ -11,6 +12,10 @@ def make_memory_tools(store: MemoryStore, global_store: MemoryStore, session_id:
             # user_preference is about the person, not this codebase -- it goes in the
             # global store so it's visible in every project, not just this one.
             target_store = global_store if category == "user_preference" else store
+            # None unless MAZU_SEMANTIC_MEMORY is opted into (see memory/embeddings.py)
+            # -- add() stores None as a plain NULL, so this never changes behavior for
+            # anyone who hasn't turned semantic search on.
+            embedding = embed_text(f"{input['title']} {input['body']}")
             memory_id = target_store.add(
                 category=category,
                 title=input["title"],
@@ -18,6 +23,7 @@ def make_memory_tools(store: MemoryStore, global_store: MemoryStore, session_id:
                 tags=input.get("tags", ""),
                 source="explicit",
                 session_id=session_id,
+                embedding=embedding,
             )
             note = ""
             supersedes_id = input.get("supersedes_id")

@@ -1,8 +1,14 @@
 from mazu.memory.bm25 import BM25
+from mazu.memory.embeddings import cosine_similarity, deserialize_embedding, embed_text, embeddings_available
 from mazu.memory.store import MemoryStore
 
 # Rough proxy for a ~2000 token budget, so the injected block never dominates the context window.
 CONTEXT_CHAR_BUDGET = 8000
+
+# Equal weight between keyword overlap and semantic closeness -- a deliberately
+# simple 50/50 split, not tuned against real usage data. Revisit if it turns out
+# one signal should dominate.
+SEMANTIC_BLEND_WEIGHT = 0.5
 
 CATEGORY_HEADINGS = {
     "decision": "Decisions",
@@ -15,7 +21,12 @@ CATEGORY_HEADINGS = {
 
 
 def _rank_by_relevance(pool: list, query: str, limit: int) -> list:
-    """Rank the candidate pool against a query using local BM25 (zero API cost).
+    """Rank the candidate pool against a query using local BM25 (zero API cost) --
+    and, only if semantic search is opted into (MAZU_SEMANTIC_MEMORY) and both the
+    query and a given memory have a stored embedding, blended with cosine
+    similarity. This is what lets a memory phrased very differently from the
+    current task ("the project's database is Postgres" vs. "what does this project
+    use for storage") still surface -- BM25 alone requires shared vocabulary.
     Falls back to recency order (pool is already recency-sorted) when there's no
     query or no term overlap at all.
     """
@@ -23,8 +34,35 @@ def _rank_by_relevance(pool: list, query: str, limit: int) -> list:
         return pool[:limit]
 
     documents = [f"{row['title']} {row['body']} {row['tags'] or ''}" for row in pool]
-    scores = BM25(documents).score(query)
-    ranked = sorted(zip(pool, scores), key=lambda pair: pair[1], reverse=True)
+    bm25_scores = BM25(documents).score(query)
+    bm25_max = max(bm25_scores) if bm25_scores else 0.0
+    bm25_normalized = [s / bm25_max if bm25_max > 0 else 0.0 for s in bm25_scores]
+
+    semantic_scores = None
+    if embeddings_available():
+        query_embedding = embed_text(query)
+        if query_embedding is not None:
+            semantic_scores = []
+            for row in pool:
+                row_embedding = deserialize_embedding(row["embedding"])
+                if row_embedding is not None:
+                    # Real text embeddings' cosine similarity is effectively always
+                    # in [0, 1] in practice; clamp any stray negative to 0 rather
+                    # than letting it pull a combined score below a pure-keyword
+                    # match's floor.
+                    semantic_scores.append(max(0.0, cosine_similarity(query_embedding, row_embedding)))
+                else:
+                    semantic_scores.append(0.0)
+
+    if semantic_scores is not None:
+        combined = [
+            (1 - SEMANTIC_BLEND_WEIGHT) * b + SEMANTIC_BLEND_WEIGHT * s
+            for b, s in zip(bm25_normalized, semantic_scores)
+        ]
+    else:
+        combined = bm25_normalized
+
+    ranked = sorted(zip(pool, combined), key=lambda pair: pair[1], reverse=True)
     top = [row for row, score in ranked if score > 0][:limit]
     return top if top else pool[:limit]
 

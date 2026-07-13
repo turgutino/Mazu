@@ -17,7 +17,7 @@ Most coding agents forget everything the moment the session ends. Mazu doesn't. 
 
 Compared to typical coding-agent CLIs, which reset context every session and rely on a static instructions file:
 
-1. **Persistent structured memory.** Decisions, conventions, and mistakes made on a project are written to a local SQLite database, ranked by local BM25 (zero API cost — no embedding calls) against your current task, and automatically injected back into context. You never have to re-explain "we use Postgres, not SQLite" in every new session.
+1. **Persistent structured memory.** Decisions, conventions, and mistakes made on a project are written to a local SQLite database, ranked by local BM25 (zero API cost — no embedding calls) against your current task, and automatically injected back into context. You never have to re-explain "we use Postgres, not SQLite" in every new session. Optional semantic search (see below) recovers matches BM25's keyword-only ranking would miss entirely.
 2. **A separate, global memory for *you*, not the project.** Personal facts — your name, preferred language, experience level, working style — live in `~/.mazu/global_memory.db` and follow you into every project, instead of being repeated (or lost) per-repo.
 3. **Checkpointable autonomy.** Every step of an autonomous run snapshots code (via git), the memory database, and the live conversation together. Roll back any one of them and you roll back all three, consistently — "undo" for an agent's actions, not just its files.
 4. **A self-growing local skill library.** When the agent solves something reusable, it can save it as a plain Python function. Next time a similar task comes up, it can run the skill directly — skipping the model call entirely.
@@ -157,6 +157,20 @@ Memories are written two ways: explicitly, when the agent calls `remember` (you 
 
 `mazu memory consolidate` catches near-duplicates that slipped past that automatic dedup (entirely local, no API calls — a word-overlap similarity check, same one `remember` already uses). It keeps the **most recently created** entry in each duplicate group and marks the rest as superseded (nothing is deleted, superseded rows just stop showing up). That "keep the newest" rule is a simple heuristic, not a judgment about which entry is actually more complete or useful — a newer, sparser restatement of a fact can end up kept over an older, more detailed one. **Always run `--dry-run` first** and read what it proposes before applying; if it picked the wrong one, `mazu memory forget <id>` the survivor and keep the original.
 
+#### Semantic search (optional)
+
+BM25 only finds memories that share actual words with your current task — it can't tell that "the project's database is Postgres" and "which relational system backs this application" are the same question. Semantic search recovers that, by comparing meaning (via embeddings) instead of just vocabulary.
+
+It's **off by default** and entirely opt-in, since it adds a real (small) API cost per `remember` call and per retrieval, on top of whatever your main model already costs:
+
+```bash
+export MAZU_SEMANTIC_MEMORY=1
+export OPENAI_API_KEY=sk-...   # required even if your main model is a different provider
+pip install "mazu[openai]"     # if not already installed
+```
+
+With that set, new memories get an embedding (OpenAI's `text-embedding-3-small`) stored alongside them at write time, and retrieval blends BM25 with cosine similarity (50/50) instead of ranking on keywords alone. Memories written before you turned this on simply don't have a stored embedding and fall back to their BM25 contribution — nothing breaks, nothing needs to be backfilled. Requires an OpenAI key specifically (for the embedding call) regardless of which provider you use for the main conversation.
+
 ### Skills
 
 ```bash
@@ -225,7 +239,8 @@ mazu/
 │   └── pricing.py        rough per-model cost estimates for --max-cost
 ├── memory/
 │   ├── store.py          SQLite-backed memory store (shared by project + global instances)
-│   ├── retrieval.py       BM25 ranking + context-block rendering
+│   ├── retrieval.py       BM25 ranking (+ optional semantic blending) + context-block rendering
+│   ├── embeddings.py      optional semantic search layer (opt-in, see below)
 │   └── extraction.py      end-of-session auto-extraction prompt
 ├── checkpoint/
 │   └── manager.py         git commit + memory/skills/conversation snapshot, retention/pruning
@@ -247,10 +262,10 @@ The project-scoped memory database lives at `.mazu/memory.db` (created by `mazu 
 
 ## Status & roadmap
 
-Milestones M1–M4 (bare tool loop, persistent memory, checkpoint/rollback, supervised autonomy) all have a working implementation, plus multi-provider support (Anthropic, OpenAI, DeepSeek, Gemini), council mode, real-time streaming (`mazu chat`), automatic context compaction (`mazu run`), a setup diagnostic (`mazu doctor`), and memory deduplication (`mazu memory consolidate`) on top. This has been exercised through live testing against real Anthropic, OpenAI, and DeepSeek API keys — chat/run tool use, memory recall (project and global), skill save/run, checkpoint/rollback (including pruning and skill restoration), memory supersede, and parallel council queries have all been verified working end-to-end. A test suite covers the core logic (memory dedup/supersede, BM25 ranking, checkpoint snapshot/restore, provider routing, streaming response parsing, context-compaction correctness, Gemini's message/tool-call conversion) with zero API cost, running on every push via GitHub Actions across Python 3.11–3.13 on Linux/Windows/macOS.
+Milestones M1–M4 (bare tool loop, persistent memory, checkpoint/rollback, supervised autonomy) all have a working implementation, plus multi-provider support (Anthropic, OpenAI, DeepSeek, Gemini), council mode, real-time streaming (`mazu chat`), automatic context compaction (`mazu run`), a setup diagnostic (`mazu doctor`), memory deduplication (`mazu memory consolidate`), and optional semantic memory search on top. This has been exercised through live testing against real Anthropic, OpenAI, and DeepSeek API keys — chat/run tool use, memory recall (project and global), skill save/run, checkpoint/rollback (including pruning and skill restoration), memory supersede, and parallel council queries have all been verified working end-to-end. Semantic search specifically was verified with real embedding calls: a memory with zero shared vocabulary with the query it was retrieved by (proving the blend actually recovers what BM25 alone cannot, not just that it returns numbers). A test suite covers the core logic (memory dedup/supersede, BM25 + semantic blending, checkpoint snapshot/restore, provider routing, streaming response parsing, context-compaction correctness, Gemini's message/tool-call conversion) with zero API cost by default, running on every push via GitHub Actions across Python 3.11–3.13 on Linux/Windows/macOS.
 
 **Known gaps, honestly listed:**
-- No semantic/embedding-based memory retrieval yet — BM25 is a solid, zero-cost baseline, but pure keyword ranking can miss a relevant memory that's phrased very differently from the current task.
+- Semantic search's 50/50 BM25/embedding blend weight is a fixed constant, not tuned against real usage data — may need adjusting once there's more real-world signal on how well it actually ranks.
 - Checkpoint/rollback is linear (like `git reset --hard`), not a branching tree.
 - Streaming is `mazu chat`-only for now — `mazu run` and `mazu council` still return complete responses, not token-by-token (streaming plus mid-stream confirmation prompts, or interleaved parallel council output, are separate design questions). Gemini specifically doesn't stream at all yet even in `mazu chat` (falls back to a complete response) — its chunk-level behavior for function calls needs to be verified against the live API before building real streaming for it.
 - Context compaction is `mazu run`-only for now, for the same reason.

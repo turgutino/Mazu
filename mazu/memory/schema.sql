@@ -10,7 +10,10 @@ CREATE TABLE IF NOT EXISTS memories (
     session_id      TEXT,
     relevance_score REAL NOT NULL DEFAULT 1.0,
     superseded_by   INTEGER REFERENCES memories(id),
-    pinned          INTEGER NOT NULL DEFAULT 0
+    pinned          INTEGER NOT NULL DEFAULT 0,
+    -- JSON-encoded embedding vector, NULL unless semantic search is opted into via
+    -- MAZU_SEMANTIC_MEMORY (see mazu/memory/embeddings.py) at write time.
+    embedding       TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);
