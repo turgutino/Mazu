@@ -10,7 +10,8 @@ import pytest
 from click.testing import CliRunner
 
 import mazu
-from mazu.cli import _memory_db_path, _usage_db_path, main
+from mazu.action_log.store import ActionLogStore
+from mazu.cli import _action_log_db_path, _memory_db_path, _usage_db_path, main
 from mazu.memory.store import MemoryStore
 from mazu.usage.store import UsageStore
 
@@ -609,3 +610,76 @@ def test_memory_list_shows_retrieval_usage_after_context_build(tmp_path, monkeyp
 
     assert result.exit_code == 0, result.output
     assert "used 1x" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Agent Action Log (Phase D): mazu log / mazu log show
+# ---------------------------------------------------------------------------
+
+
+def test_log_empty_project(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(main, ["log"])
+
+    assert result.exit_code == 0
+    assert "No actions recorded yet." in result.output
+
+
+def test_log_lists_recent_sessions(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = ActionLogStore(_action_log_db_path(tmp_path))
+    store.log("s1", "chat", "read_file", '{"path": "a.py"}', "ok", "contents", None)
+    store.log("s1", "chat", "write_file", '{"path": "a.py"}', "error", "boom", "a.py")
+    store.close()
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["log"])
+
+    assert result.exit_code == 0, result.output
+    assert "s1" in result.output
+    assert "(chat)" in result.output
+    assert "2 action(s)" in result.output
+    assert "1 not-ok" in result.output
+
+
+def test_log_show_unknown_session(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(main, ["log", "show", "nope"])
+
+    assert result.exit_code == 0
+    assert "No actions recorded for session nope." in result.output
+
+
+def test_log_show_displays_full_action_detail(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = ActionLogStore(_action_log_db_path(tmp_path))
+    store.log(
+        "s1", "run", "write_file", '{"path": "a.py"}', "ok", "Wrote 5 bytes to a.py", "a.py"
+    )
+    store.close()
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["log", "show", "s1"])
+
+    assert result.exit_code == 0, result.output
+    assert "write_file" in result.output
+    assert "ok" in result.output
+    assert "Wrote 5 bytes to a.py" in result.output
+    assert "a.py" in result.output
+
+
+def test_log_show_only_shows_the_requested_session(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = ActionLogStore(_action_log_db_path(tmp_path))
+    store.log("s1", "chat", "read_file", "{}", "ok", "s1 output", None)
+    store.log("s2", "chat", "read_file", "{}", "ok", "s2 output", None)
+    store.close()
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["log", "show", "s1"])
+
+    assert result.exit_code == 0, result.output
+    assert "s1 output" in result.output
+    assert "s2 output" not in result.output

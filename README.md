@@ -238,6 +238,17 @@ mazu usage --since-days 7   # only the last 7 days
 
 Like `--max-cost`, this is an *estimate* from a built-in, occasionally-stale pricing table (see [`mazu/llm/pricing.py`](mazu/llm/pricing.py)) — treat it as a helpful approximation, not a substitute for your provider's own billing dashboard.
 
+### Agent action log
+
+Every tool call `mazu chat`, `mazu run`, and `mazu council` make — what tool, what input, what happened, and what file (if any) it touched — is recorded to a project-scoped store at `.mazu/action_log.db`, so "what exactly did the agent do in this session" is always answerable after the fact, not just while you're watching the terminal.
+
+```bash
+mazu log                       # recent sessions: action count, error count, time range
+mazu log show <session_id>     # every tool call in that session, in order, with input/output
+```
+
+This captures the tool-call layer specifically — blocked (denylisted shell command), declined (you said no to a confirmation prompt), and unknown-tool cases are all recorded too, not just successful calls, so a `mazu log show` after a confusing run tells you exactly where and why something didn't happen the way you expected.
+
 ### Diagnosing setup problems
 
 ```bash

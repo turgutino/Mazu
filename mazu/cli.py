@@ -5,6 +5,7 @@ from pathlib import Path
 import click
 
 from mazu import __version__
+from mazu.action_log.store import ActionLogStore
 from mazu.agent.autonomous import run_autonomous
 from mazu.agent.council import run_council
 from mazu.agent.loop import run_chat_loop
@@ -45,6 +46,13 @@ def _global_memory_db_path() -> Path:
     # Deliberately not tied to any project root — this is the one store shared across
     # every project, for durable facts about the person, not the codebase.
     return Path.home() / ".mazu" / "global_memory.db"
+
+
+def _action_log_db_path(root: Path) -> Path:
+    # Project-scoped like memory.db, not global like usage.db -- "what did the agent
+    # do in this project" is a per-project question, and correlates with checkpoints
+    # and project memory writes that are themselves project-scoped.
+    return _mazu_dir(root) / "action_log.db"
 
 
 def _usage_db_path() -> Path:
@@ -159,6 +167,7 @@ def chat(model: str | None) -> None:
     skill_manager = SkillManager(root)
     checkpoint_manager = CheckpointManager(root)
     usage_store = UsageStore(_usage_db_path())
+    action_log_store = ActionLogStore(_action_log_db_path(root))
     session_id = str(uuid.uuid4())
 
     registry = _build_registry(root, memory_store, global_memory_store, skill_manager, session_id)
@@ -172,6 +181,7 @@ def chat(model: str | None) -> None:
         checkpoint_manager=checkpoint_manager,
         model=model,
         usage_store=usage_store,
+        action_log_store=action_log_store,
     )
 
 
@@ -221,6 +231,7 @@ def run(
     checkpoint_kwargs = {"retention": keep_checkpoints} if keep_checkpoints is not None else {}
     checkpoint_manager = CheckpointManager(root, **checkpoint_kwargs)
     usage_store = UsageStore(_usage_db_path())
+    action_log_store = ActionLogStore(_action_log_db_path(root))
     session_id = str(uuid.uuid4())
 
     registry = _build_registry(root, memory_store, global_memory_store, skill_manager, session_id)
@@ -239,6 +250,7 @@ def run(
         max_cost=max_cost,
         model=model,
         usage_store=usage_store,
+        action_log_store=action_log_store,
     )
 
 
@@ -275,6 +287,7 @@ def council(question: str, models: str, lead: str) -> None:
     global_memory_store = MemoryStore(_global_memory_db_path())
     skill_manager = SkillManager(root)
     usage_store = UsageStore(_usage_db_path())
+    action_log_store = ActionLogStore(_action_log_db_path(root))
     session_id = str(uuid.uuid4())
     registry = _build_registry(root, memory_store, global_memory_store, skill_manager, session_id)
 
@@ -290,11 +303,13 @@ def council(question: str, models: str, lead: str) -> None:
             skill_manager=skill_manager,
             usage_store=usage_store,
             session_id=session_id,
+            action_log_store=action_log_store,
         )
     finally:
         memory_store.close()
         global_memory_store.close()
         usage_store.close()
+        action_log_store.close()
 
 
 @main.group(invoke_without_command=True)
@@ -522,6 +537,48 @@ def usage_cmd(since_days: int | None) -> None:
             "\nNote: some calls used a model with no entry in the pricing table and "
             "aren't reflected in the totals above."
         )
+
+
+@main.group(invoke_without_command=True)
+@click.pass_context
+def log(ctx: click.Context) -> None:
+    """Inspect the persistent agent action log: every tool call, across every
+    session, in this project. With no subcommand, lists recent sessions."""
+    if ctx.invoked_subcommand is None:
+        _print_recent_sessions()
+
+
+def _print_recent_sessions() -> None:
+    store = ActionLogStore(_action_log_db_path(Path.cwd()))
+    sessions = store.list_sessions()
+    store.close()
+    if not sessions:
+        click.echo("No actions recorded yet.")
+        return
+    for s in sessions:
+        click.echo(
+            f"{s['session_id']}  ({s['command']})  {s['action_count']} action(s), "
+            f"{s['error_count']} not-ok  {s['started_at']} -> {s['last_at']}"
+        )
+
+
+@log.command("show")
+@click.argument("session_id")
+def log_show(session_id: str) -> None:
+    """Show the full action log for one session: every tool call, its input, outcome,
+    and output, in order."""
+    store = ActionLogStore(_action_log_db_path(Path.cwd()))
+    actions = store.session_actions(session_id)
+    store.close()
+    if not actions:
+        click.echo(f"No actions recorded for session {session_id}.")
+        return
+    for a in actions:
+        click.echo(f"[{a['created_at']}] {a['tool_name']} — {a['outcome']}")
+        click.echo(f"    input: {a['tool_input']}")
+        click.echo(f"    output: {a['output_summary']}")
+        if a["changed_file"]:
+            click.echo(f"    changed: {a['changed_file']}")
 
 
 @main.command()

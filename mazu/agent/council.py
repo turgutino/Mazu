@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from mazu.action_log.store import ActionLogStore, record_action
 from mazu.agent.context import build_system_prompt
 from mazu.llm.client import _split_model, run_turn, summarize_usage
 from mazu.llm.errors import MazuAPIError
@@ -46,17 +47,19 @@ def _read_only_registry(full_registry: ToolRegistry) -> ToolRegistry:
 
 def _ask_member(
     model: str, question: str, registry: ToolRegistry, system_prompt: str, max_rounds: int = 6
-) -> tuple[str, list[dict]]:
-    """Returns (final_text, usage_list) -- one usage dict per model call this member
-    made. Deliberately returns usage instead of logging it directly: this function
-    runs inside a worker thread (see run_council's ThreadPoolExecutor), and
-    UsageStore's sqlite3 connection is not safe to write from multiple threads.
+) -> tuple[str, list[dict], list[dict]]:
+    """Returns (final_text, usage_list, action_records) -- one usage dict per model
+    call this member made, and one action record dict per tool call. Deliberately
+    returns both instead of logging them directly: this function runs inside a worker
+    thread (see run_council's ThreadPoolExecutor), and both UsageStore's and
+    ActionLogStore's sqlite3 connections are not safe to write from multiple threads.
     Logging happens back in the main thread once future.result() returns.
     """
     messages: list[dict] = [{"role": "user", "content": question}]
     member_system = system_prompt + MEMBER_PROMPT_SUFFIX
     final_text = "(no response)"
     usage_list: list[dict] = []
+    action_records: list[dict] = []
 
     for _ in range(max_rounds):
         response = run_turn(messages, member_system, registry.schemas(), model=model)
@@ -77,6 +80,14 @@ def _ask_member(
                 continue
             tool = registry.get(block["name"])
             if tool is None:
+                action_records.append(
+                    {
+                        "tool_name": block["name"],
+                        "tool_input": block["input"],
+                        "outcome": "unknown_tool",
+                        "output_summary": f"Unknown tool: {block['name']}",
+                    }
+                )
                 tool_results.append(
                     {
                         "type": "tool_result",
@@ -87,6 +98,14 @@ def _ask_member(
                 )
                 continue
             result = tool.handler(block["input"])
+            action_records.append(
+                {
+                    "tool_name": tool.name,
+                    "tool_input": block["input"],
+                    "outcome": "error" if result.is_error else "ok",
+                    "output_summary": result.content,
+                }
+            )
             tool_results.append(
                 {
                     "type": "tool_result",
@@ -97,7 +116,7 @@ def _ask_member(
             )
         messages.append({"role": "user", "content": tool_results})
 
-    return final_text, usage_list
+    return final_text, usage_list, action_records
 
 
 def _log_usage(
@@ -122,6 +141,7 @@ def run_council(
     skill_manager=None,
     usage_store: UsageStore | None = None,
     session_id: str | None = None,
+    action_log_store: ActionLogStore | None = None,
 ) -> str:
     system_prompt = build_system_prompt(
         memory_store, skill_manager, query=question, global_memory_store=global_memory_store
@@ -146,12 +166,18 @@ def run_council(
         for future in as_completed(future_to_model):
             model = future_to_model[future]
             try:
-                text, usage_list = future.result()
+                text, usage_list, action_records = future.result()
                 responses[model] = text
                 # Logged here, in the main thread, not inside the worker -- see
                 # _ask_member's docstring for why.
                 for usage in usage_list:
                     _log_usage(usage_store, session_id, model, usage)
+                for record in action_records:
+                    record_action(
+                        action_log_store, session_id, "council",
+                        record["tool_name"], record["tool_input"],
+                        record["outcome"], record["output_summary"],
+                    )
             except Exception as e:
                 responses[model] = f"(failed: {e})"
             print(f"[{model}] done")

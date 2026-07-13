@@ -31,10 +31,10 @@ This file is split into two parts on purpose:
 - [x] `mazu memory supersede <old_id> <new_id>` — CLI wrapper around the `supersede()` method `remember` already uses internally
 - [x] Track `last_used_at` / `retrieval_count` per memory (new columns + update-on-retrieval), shown in `mazu memory list`
 
-### Phase D — Agent Action Log
-- [ ] Persistent log of every tool call: time, tool name, input, output summary, changed files, exit code
-- [ ] `mazu log` — list recent sessions/runs
-- [ ] `mazu log show <session_id>` — full action log for one session
+### Phase D — Agent Action Log ✅ done
+- [x] Persistent log of every tool call: time, tool name, input, output summary, changed files, outcome (ok/error/blocked/declined/unknown_tool) — `.mazu/action_log.db`, project-scoped like memory.db
+- [x] `mazu log` — list recent sessions/runs
+- [x] `mazu log show <session_id>` — full action log for one session
 
 ### Phase E — Safer Execution
 - [ ] `mazu run "..." --dry-run` — show what would happen without writing/running anything

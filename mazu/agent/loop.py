@@ -1,3 +1,4 @@
+from mazu.action_log.store import ActionLogStore, record_action
 from mazu.agent.context import build_system_prompt
 from mazu.agent.interaction import safe_confirm
 from mazu.agent.session import finalize_session
@@ -27,6 +28,7 @@ def run_chat_loop(
     checkpoint_manager: CheckpointManager | None = None,
     model: str | None = None,
     usage_store: UsageStore | None = None,
+    action_log_store: ActionLogStore | None = None,
 ) -> None:
     messages: list[dict] = []
     system_prompt = None  # built lazily from the first real task, so retrieval has a query
@@ -80,6 +82,7 @@ def run_chat_loop(
                 usage_store,
                 session_id,
                 total_cost,
+                action_log_store,
             )
     finally:
         if memory_store is not None:
@@ -88,6 +91,8 @@ def run_chat_loop(
             global_memory_store.close()
         if usage_store is not None:
             usage_store.close()
+        if action_log_store is not None:
+            action_log_store.close()
 
 
 def _handle_checkpoint(checkpoint_manager: CheckpointManager | None, messages: list[dict]) -> None:
@@ -136,6 +141,7 @@ def _run_until_done(
     usage_store: UsageStore | None,
     session_id: str,
     total_cost: float,
+    action_log_store: ActionLogStore | None = None,
 ) -> float:
     provider_name, model_name = _split_model(resolved_model)
     while True:
@@ -183,6 +189,10 @@ def _run_until_done(
                 continue
             tool = registry.get(block["name"])
             if tool is None:
+                record_action(
+                    action_log_store, session_id, "chat", block["name"], block["input"],
+                    "unknown_tool", f"Unknown tool: {block['name']}",
+                )
                 tool_results.append(
                     {
                         "type": "tool_result",
@@ -195,6 +205,10 @@ def _run_until_done(
             if tool.name == "run_shell" and is_denied_shell_command(
                 block["input"].get("command", "")
             ):
+                record_action(
+                    action_log_store, session_id, "chat", tool.name, block["input"],
+                    "blocked", "Blocked: command matches the safety denylist.",
+                )
                 tool_results.append(
                     {
                         "type": "tool_result",
@@ -205,6 +219,10 @@ def _run_until_done(
                 )
                 continue
             if tool.destructive and not _confirm(tool.name, block["input"]):
+                record_action(
+                    action_log_store, session_id, "chat", tool.name, block["input"],
+                    "declined", "User declined to run this tool.",
+                )
                 tool_results.append(
                     {
                         "type": "tool_result",
@@ -215,6 +233,10 @@ def _run_until_done(
                 )
                 continue
             result = tool.handler(block["input"])
+            record_action(
+                action_log_store, session_id, "chat", tool.name, block["input"],
+                "error" if result.is_error else "ok", result.content,
+            )
             tool_results.append(
                 {
                     "type": "tool_result",

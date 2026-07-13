@@ -1,3 +1,4 @@
+from mazu.action_log.store import ActionLogStore, record_action
 from mazu.agent.compaction import compact_if_needed, force_compact
 from mazu.agent.context import build_system_prompt
 from mazu.agent.interaction import safe_confirm
@@ -29,6 +30,7 @@ def run_autonomous(
     max_cost: float | None = None,
     model: str | None = None,
     usage_store: UsageStore | None = None,
+    action_log_store: ActionLogStore | None = None,
 ) -> None:
     if checkpoint_manager.is_dirty():
         print(
@@ -135,7 +137,9 @@ def run_autonomous(
                     )
                     break
 
-                tool_results, round_failed = _execute_round(response, registry, allow_shell)
+                tool_results, round_failed = _execute_round(
+                    response, registry, allow_shell, action_log_store, session_id
+                )
                 messages.append({"role": "user", "content": tool_results})
 
                 consecutive_failures = consecutive_failures + 1 if round_failed else 0
@@ -161,10 +165,16 @@ def run_autonomous(
             global_memory_store.close()
         if usage_store is not None:
             usage_store.close()
+        if action_log_store is not None:
+            action_log_store.close()
 
 
 def _execute_round(
-    response, registry: ToolRegistry, allow_shell: bool
+    response,
+    registry: ToolRegistry,
+    allow_shell: bool,
+    action_log_store: ActionLogStore | None = None,
+    session_id: str | None = None,
 ) -> tuple[list[dict], bool]:
     tool_results = []
     round_failed = False
@@ -173,6 +183,10 @@ def _execute_round(
             continue
         tool = registry.get(block["name"])
         if tool is None:
+            record_action(
+                action_log_store, session_id, "run", block["name"], block["input"],
+                "unknown_tool", f"Unknown tool: {block['name']}",
+            )
             tool_results.append(
                 {
                     "type": "tool_result",
@@ -187,6 +201,10 @@ def _execute_round(
         if tool.name == "run_shell":
             command = block["input"].get("command", "")
             if is_denied_shell_command(command):
+                record_action(
+                    action_log_store, session_id, "run", tool.name, block["input"],
+                    "blocked", "Blocked: command matches the safety denylist.",
+                )
                 tool_results.append(
                     {
                         "type": "tool_result",
@@ -200,6 +218,10 @@ def _execute_round(
             if not allow_shell:
                 print(f"\n[confirm] run_shell({block['input']})")
                 if not safe_confirm("Run this? [y/N] "):
+                    record_action(
+                        action_log_store, session_id, "run", tool.name, block["input"],
+                        "declined", "User declined to run this tool.",
+                    )
                     tool_results.append(
                         {
                             "type": "tool_result",
@@ -213,6 +235,10 @@ def _execute_round(
         result = tool.handler(block["input"])
         if result.is_error:
             round_failed = True
+        record_action(
+            action_log_store, session_id, "run", tool.name, block["input"],
+            "error" if result.is_error else "ok", result.content,
+        )
         tool_results.append(
             {
                 "type": "tool_result",
