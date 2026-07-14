@@ -43,6 +43,9 @@ pip install "mazu[openai]"
 
 # Only needed for gemini:* models:
 pip install "mazu[gemini]"
+
+# Only needed for `mazu ui` (the terminal UI):
+pip install "mazu[ui]"
 ```
 
 To work on Mazu itself instead, install it from source in editable mode:
@@ -254,6 +257,14 @@ pip install "mazu[openai]"     # if not already installed
 ```
 
 With that set, new memories get an embedding (OpenAI's `text-embedding-3-small`) stored alongside them at write time, and retrieval blends BM25 with cosine similarity (50/50) instead of ranking on keywords alone. Memories written before you turned this on simply don't have a stored embedding and fall back to their BM25 contribution — nothing breaks, nothing needs to be backfilled. Requires an OpenAI key specifically (for the embedding call) regardless of which provider you use for the main conversation.
+
+### Terminal UI
+
+```bash
+mazu ui
+```
+
+An interactive, full-screen alternative to `mazu timeline`/`mazu memory list`/`mazu log` for browsing the same data — three tabs (Checkpoints, Memory, Action Log), navigated with arrow keys and Tab, not a separate mechanism from the CLI commands above. `r` on a checkpoint rolls back to it (confirmed first, same as `mazu rollback`); `p` on a memory pins/unpins it (same as `mazu memory pin`/`unpin`); selecting a session in the Action Log tab loads its individual tool calls below it. Every action goes through the exact same store methods the CLI commands use — this is a different way to reach the same operations, not a second implementation of them. Requires the `mazu[ui]` extra (see [Installation](#installation)) and an initialized project (`mazu init` first).
 
 ### Skills
 

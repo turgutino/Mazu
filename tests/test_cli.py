@@ -1204,3 +1204,62 @@ def test_setup_help_documents_the_command():
     result = runner.invoke(main, ["setup", "--help"])
     assert result.exit_code == 0
     assert "wizard" in result.output.lower()
+
+
+# ---------------------------------------------------------------------------
+# Terminal UI (Phase K): mazu ui
+# ---------------------------------------------------------------------------
+
+
+def test_ui_requires_initialized_project(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(main, ["ui"])
+
+    assert result.exit_code == 0
+    assert "mazu init" in result.output
+
+
+def test_ui_launches_the_app_when_initialized(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".mazu").mkdir()
+
+    captured = {}
+
+    class _FakeApp:
+        def __init__(self, root):
+            captured["root"] = root
+
+        def run(self):
+            captured["ran"] = True
+
+    monkeypatch.setattr("mazu.ui.app.MazuApp", _FakeApp)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["ui"])
+
+    assert result.exit_code == 0, result.output
+    assert captured["ran"] is True
+    assert captured["root"] == tmp_path
+
+
+def test_ui_reports_missing_extra_cleanly(tmp_path, monkeypatch):
+    import builtins
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".mazu").mkdir()
+
+    real_import = builtins.__import__
+
+    def _fake_import(name, *args, **kwargs):
+        if name == "mazu.ui.app" or name.startswith("mazu.ui.app."):
+            raise ImportError("No module named 'textual'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _fake_import)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["ui"])
+
+    assert result.exit_code == 0, result.output
+    assert 'pip install "mazu[ui]"' in result.output

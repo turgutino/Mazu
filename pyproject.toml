@@ -1,6 +1,6 @@
 [project]
 name = "mazu"
-version = "0.12.2"
+version = "0.13.0"
 description = "A local memory and checkpoint layer for coding agents."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -44,7 +44,8 @@ dependencies = [
 [project.optional-dependencies]
 openai = ["openai>=1.0"]
 gemini = ["google-genai>=1.0"]
-dev = ["pytest>=8.0"]
+ui = ["textual>=0.60"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
 
 [project.urls]
 Homepage = "https://github.com/turgutino/Mazu"

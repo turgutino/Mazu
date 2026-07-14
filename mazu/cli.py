@@ -509,6 +509,25 @@ def runs_cmd(limit: int) -> None:
         )
 
 
+@main.command("ui")
+def ui_cmd() -> None:
+    """Launch the terminal UI: browse checkpoints, memory, and the action log
+    interactively. Requires the current directory to already be a Mazu project
+    (`mazu init` first) and the optional `mazu[ui]` extra."""
+    root = Path.cwd()
+    if not (root / ".mazu").exists():
+        click.echo("No .mazu/ here yet -- run `mazu init` first.")
+        return
+    try:
+        from mazu.ui.app import MazuApp
+    except ImportError:
+        click.echo(
+            'The terminal UI needs the "ui" extra. Install it with: pip install "mazu[ui]"'
+        )
+        return
+    MazuApp(root).run()
+
+
 DEFAULT_COUNCIL_MODELS = "anthropic:claude-sonnet-5,anthropic:claude-opus-4-8"
 DEFAULT_COUNCIL_LEAD = "anthropic:claude-opus-4-8"
 
