@@ -1,6 +1,6 @@
 [project]
 name = "mazu"
-version = "0.12.0"
+version = "0.12.1"
 description = "A local memory and checkpoint layer for coding agents."
 readme = "README.md"
 requires-python = ">=3.11"

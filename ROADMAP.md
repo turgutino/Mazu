@@ -66,8 +66,8 @@ This file is split into two parts on purpose:
 ### Phase K — Terminal UI (`mazu ui`)
 - [ ] Only after Phases B–D are solid — a TUI over checkpoint timeline / memory browser / action log, likely via `textual` or `rich`
 
-### Phase L — VS Code / Cursor extension (plan only, for now)
-- [ ] Written design doc once Phase K is done — this is a separate project in its own right (different language/tooling), not a Mazu CLI feature; actual implementation is out of scope until there's a reason to believe people want it
+### Phase L — VS Code / Cursor extension (plan only, for now) ✅ design doc done
+- [x] Written design doc — [docs/vscode-extension-design.md](../docs/vscode-extension-design.md). Done ahead of Phase K at the user's explicit request (normally sequenced after it); this is a separate project in its own right (different language/tooling), not a Mazu CLI feature, so implementation is still out of scope until there's a reason to believe people want it. The design pass surfaced a concrete, real prerequisite: Mazu has no machine-readable (`--json`) output today — every command is human-formatted text — so an extension has nothing stable to integrate against yet. That's flagged in the doc as its own future ROADMAP item, not silently assumed away.
 
 ## Directional (not committed — needs a second audience first)
 
