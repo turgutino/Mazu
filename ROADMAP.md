@@ -60,8 +60,8 @@ This file is split into two parts on purpose:
 - [ ] `examples/` — at least one worked-through example project
 - [ ] `docs/` if the above grows past what fits comfortably in a few root-level files
 
-### Phase J — Demo
-- [ ] A concrete, scripted demo scenario (agent makes a mistake → `mazu timeline` finds the bad step → `mazu checkpoint diff` shows the damage → recover via rollback or `branch-from` → memory means it isn't repeated) — as a `docs/demo.md` walkthrough first; a recorded video/GIF is the user's own call, not a code task
+### Phase J — Demo ✅ done
+- [x] A concrete, scripted demo scenario (agent makes a mistake → `mazu timeline` finds the bad step → `mazu checkpoint diff` shows the damage → recover via rollback → memory means it isn't repeated) — [docs/demo.md](../docs/demo.md). Every command/output shown is real (run against an actual project, actual git, actual SQLite stores, twice — once to write it, once fresh from scratch to verify reproducibility); only the model's own responses are scripted/deterministic rather than a live API call, so the walkthrough doesn't depend on what a live model happens to say on a given run. A recorded video/GIF is still the user's own call, not a code task.
 
 ### Phase K — Terminal UI (`mazu ui`)
 - [ ] Only after Phases B–D are solid — a TUI over checkpoint timeline / memory browser / action log, likely via `textual` or `rich`

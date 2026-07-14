@@ -101,6 +101,8 @@ mazu chat
 PostgreSQL — this was a project decision, not SQLite.
 ```
 
+For a longer, real walkthrough of the actual reason checkpoints and memory exist — an agent makes a mistake, breaks a test, `mazu timeline`/`checkpoint diff` find and show exactly what broke, `mazu rollback` undoes it, and `mazu memory` makes sure it doesn't happen again — see [docs/demo.md](docs/demo.md).
+
 ## Usage
 
 ### Interactive chat
