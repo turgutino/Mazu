@@ -25,7 +25,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install Mazu with dev + optional dependencies
-        run: pip install -e ".[dev,openai,gemini]"
+        run: pip install -e ".[dev,openai,gemini,ui]"
 
       - name: Run test suite
         run: pytest -v
