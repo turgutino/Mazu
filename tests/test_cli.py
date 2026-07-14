@@ -139,6 +139,43 @@ def test_doctor_live_flag_does_not_crash_without_keys(tmp_path, monkeypatch):
     assert "(live)" not in result.output  # nothing to live-check with no keys set
 
 
+def test_doctor_fix_creates_gitignore_and_git_repo(tmp_path, monkeypatch):
+    import subprocess
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    subprocess.run(["git", "config", "--global", "user.email", "test@example.com"])
+    subprocess.run(["git", "config", "--global", "user.name", "Test"])
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-fake")
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["doctor", "--fix"])
+
+    assert result.exit_code == 0, result.output
+    assert "[fix]" in result.output
+    assert (tmp_path / ".git").exists()
+    assert ".mazu/" in (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    assert "[FAIL]" not in result.output
+
+
+def test_doctor_fix_reports_nothing_to_fix_when_already_correct(tmp_path, monkeypatch):
+    import subprocess
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    (tmp_path / ".gitignore").write_text(".mazu/\n", encoding="utf-8")
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-fake")
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["doctor", "--fix"])
+
+    assert result.exit_code == 0, result.output
+    assert "Nothing to fix." in result.output
+
+
 def test_usage_since_days_filters(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     store = UsageStore(_usage_db_path())
@@ -1020,3 +1057,150 @@ def test_config_set_default_model_affects_chat_without_explicit_model_flag(tmp_p
     # The real proof this worked: ensure_api_key(None) didn't raise SystemExit, which
     # it would have if default_model() hadn't picked up deepseek from config and
     # instead fallen through to the hardcoded Anthropic default with no key set.
+
+
+# ---------------------------------------------------------------------------
+# Install & Onboarding (Phase H): mazu setup
+# ---------------------------------------------------------------------------
+
+
+def _git_ready(tmp_path, monkeypatch):
+    import subprocess
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    subprocess.run(["git", "config", "--global", "user.email", "test@example.com"])
+    subprocess.run(["git", "config", "--global", "user.name", "Test"])
+
+
+# Config-value assertions below go through mazu.config.list_config() rather than
+# reading a guessed file path directly -- config_path() is redirected by the global
+# autouse fixture in tests/conftest.py (an isolated tmp_path, not based on HOME), so
+# list_config() is the only way to see exactly what a test actually wrote, matching
+# how the production code itself reads it back.
+
+
+def test_setup_saves_key_and_declines_verify_and_init(tmp_path, monkeypatch):
+    from mazu.config import list_config
+
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+
+    runner = CliRunner()
+    # provider=deepseek, key=..., verify=n, default_model=n, init=n
+    result = runner.invoke(main, ["setup"], input="deepseek\nsk-test-123\nn\nn\nn\n")
+
+    assert result.exit_code == 0, result.output
+    assert "Saved to" in result.output
+    assert list_config()["deepseek_api_key"] == "sk-test-123"
+    assert not (project / ".mazu").exists()  # declined init
+
+
+def test_setup_sets_default_model_when_confirmed(tmp_path, monkeypatch):
+    from mazu.config import list_config
+
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["setup"], input="anthropic\nsk-test-123\nn\ny\nn\n")
+
+    assert result.exit_code == 0, result.output
+    assert "default_model set to anthropic:claude-sonnet-5" in result.output
+    assert list_config()["default_model"] == "anthropic:claude-sonnet-5"
+
+
+def test_setup_declines_default_model(tmp_path, monkeypatch):
+    from mazu.config import list_config
+
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["setup"], input="anthropic\nsk-test-123\nn\nn\nn\n")
+
+    assert result.exit_code == 0, result.output
+    assert "default_model" not in list_config()
+
+
+def test_setup_initializes_project_when_confirmed(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    _git_ready(project, monkeypatch)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["setup"], input="deepseek\nsk-test-123\nn\nn\ny\n")
+
+    assert result.exit_code == 0, result.output
+    assert (project / ".mazu").exists()
+    assert "Initialized Mazu project memory" in result.output
+
+
+def test_setup_skips_init_prompt_when_already_initialized(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / ".mazu").mkdir()
+    monkeypatch.chdir(project)
+
+    runner = CliRunner()
+    # Only 4 answers needed (provider, key, verify, default_model) -- init must NOT
+    # be prompted; if it were, this input sequence would be misapplied to the wrong
+    # prompt and the command would hang/fail on missing input.
+    result = runner.invoke(main, ["setup"], input="deepseek\nsk-test-123\nn\nn\n")
+
+    assert result.exit_code == 0, result.output
+    assert "Initialize Mazu in the current directory" not in result.output
+
+
+def test_setup_live_verify_success_path(tmp_path, monkeypatch):
+    from mazu.diagnostics import CheckResult
+
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+
+    monkeypatch.setattr(
+        cli_module,
+        "check_live_api_key",
+        lambda provider_name, model: CheckResult(f"{provider_name} (live)", "ok", "authenticated successfully"),
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["setup"], input="deepseek\nsk-test-123\ny\nn\nn\n")
+
+    assert result.exit_code == 0, result.output
+    assert "[OK] authenticated successfully" in result.output
+
+
+def test_setup_live_verify_failure_path_still_keeps_the_key(tmp_path, monkeypatch):
+    from mazu.config import list_config
+    from mazu.diagnostics import CheckResult
+
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+
+    monkeypatch.setattr(
+        cli_module,
+        "check_live_api_key",
+        lambda provider_name, model: CheckResult(f"{provider_name} (live)", "fail", "key rejected: bad key"),
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["setup"], input="deepseek\nsk-test-123\ny\nn\nn\n")
+
+    assert result.exit_code == 0, result.output
+    assert "[FAIL] key rejected" in result.output
+    assert "still saved" in result.output
+    assert list_config()["deepseek_api_key"] == "sk-test-123"
+
+
+def test_setup_help_documents_the_command():
+    runner = CliRunner()
+    result = runner.invoke(main, ["setup", "--help"])
+    assert result.exit_code == 0
+    assert "wizard" in result.output.lower()

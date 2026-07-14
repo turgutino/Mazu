@@ -51,9 +51,9 @@ This file is split into two parts on purpose:
 - [x] `mazu config set / list / unset` for persistent settings (default model, per-provider API keys) — `~/.mazu/config.toml`, generalized from the old Anthropic-only `api_key` field; env vars still always win
 - [ ] Real streaming for Gemini — **deliberately deferred**, not implemented. The `google-genai` SDK's `generate_content_stream` docs/source don't confirm whether `function_call` parts arrive fragmented, whole, or only in the final chunk during a stream (unlike Anthropic's `stream()`/`get_final_message()` pattern or OpenAI's well-documented delta-accumulation, both already verified and implemented). Guessing wrong risks silently mishandling tool calls for every Gemini user. Needs a live Gemini key with real quota (the one used earlier in this project had zero free-tier quota) to verify chunk behavior before implementing — revisit then.
 
-### Phase H — Install & Onboarding
-- [ ] `mazu doctor --fix` — auto-fix what it can (missing `.gitignore` entry, offer to run `mazu init`)
-- [ ] `mazu setup` — first-run wizard (pick a provider, paste a key, verify it works)
+### Phase H — Install & Onboarding ✅ done
+- [x] `mazu doctor --fix` — auto-fixes what's safely fixable with no judgment call needed (missing `.gitignore` entry, uninitialized git repo). Deliberately leaves API keys/Python version/package installs as report-only, since those need a value or a decision only the user has
+- [x] `mazu setup` — first-run wizard: pick a provider, paste a key (persisted to `~/.mazu/config.toml`, masked everywhere it's shown), optionally verify it live, optionally set it as `default_model`, optionally initialize the current directory
 
 ### Phase I — Documentation overhaul
 - [ ] README restructured: what is Mazu / why not Cursor / core idea / quickstart / checkpoint demo / memory demo / safety model / architecture (linking out to `ARCHITECTURE.md`) / roadmap

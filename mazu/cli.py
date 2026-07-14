@@ -19,7 +19,7 @@ from mazu.config import (
     set_config_value,
     unset_config_value,
 )
-from mazu.diagnostics import run_diagnostics
+from mazu.diagnostics import apply_fixes, check_live_api_key, ensure_gitignore, run_diagnostics
 from mazu.llm.capabilities import list_capabilities
 from mazu.memory.consolidate import apply_consolidation, find_duplicate_clusters
 from mazu.memory.retrieval import explain_retrieval
@@ -39,8 +39,6 @@ from mazu.usage.store import UsageStore
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
         _stream.reconfigure(encoding="utf-8", errors="replace")
-
-GITIGNORE_ENTRY = ".mazu/"
 
 
 def _mazu_dir(root: Path) -> Path:
@@ -74,16 +72,6 @@ def _usage_db_path() -> Path:
     # Global like global_memory.db — spend is tied to the person/API keys, not any
     # one project. A separate file on purpose (see UsageStore's docstring).
     return Path.home() / ".mazu" / "usage.db"
-
-
-def _ensure_gitignore(root: Path) -> None:
-    gitignore = root / ".gitignore"
-    if gitignore.exists():
-        if GITIGNORE_ENTRY not in gitignore.read_text(encoding="utf-8"):
-            with open(gitignore, "a", encoding="utf-8") as f:
-                f.write(f"\n{GITIGNORE_ENTRY}\n")
-    else:
-        gitignore.write_text(f"{GITIGNORE_ENTRY}\n", encoding="utf-8")
 
 
 def _build_registry(
@@ -127,7 +115,7 @@ def init() -> None:
 
     store = MemoryStore(_memory_db_path(root))
     store.close()
-    _ensure_gitignore(root)
+    ensure_gitignore(root)
 
     checkpoint_manager = CheckpointManager(root)
     was_git_repo = checkpoint_manager.is_git_repo()
@@ -152,10 +140,29 @@ _STATUS_MARK = {"ok": "[OK]  ", "warn": "[WARN]", "fail": "[FAIL]"}
     help="Also make one minimal real API call per configured provider to confirm the "
     "key actually authenticates (costs a fraction of a cent per provider checked).",
 )
-def doctor(live: bool) -> None:
+@click.option(
+    "--fix",
+    is_flag=True,
+    default=False,
+    help="Automatically fix what's safely fixable without a value only you have: "
+    "adds .mazu/ to .gitignore if missing, initializes a git repo if this directory "
+    "isn't one yet. Doesn't touch API keys, Python version, or package installs -- "
+    "use `mazu setup` for API keys.",
+)
+def doctor(live: bool, fix: bool) -> None:
     """Diagnose common setup problems: Python/git availability, which provider keys
     are configured, and whether the current directory is ready for `mazu run`."""
     root = Path.cwd()
+
+    if fix:
+        fixed = apply_fixes(root)
+        if fixed:
+            for description in fixed:
+                click.echo(f"[fix] {description}")
+            click.echo()
+        else:
+            click.echo("[fix] Nothing to fix.\n")
+
     results = run_diagnostics(root, live=live)
 
     for r in results:
@@ -170,6 +177,61 @@ def doctor(live: bool) -> None:
         click.echo(f"No blocking problems, but {warn_count} thing(s) worth a look.")
     else:
         click.echo("Everything looks good.")
+
+
+_SETUP_PROVIDER_CHOICES = ["anthropic", "openai", "deepseek", "gemini"]
+
+
+@main.command("setup")
+def setup_wizard() -> None:
+    """Interactive first-run wizard: pick a provider, paste an API key, verify it
+    works, and initialize the current directory. Everything it does is also doable
+    piece by piece via `mazu config set` / `mazu init` / `mazu doctor` -- this just
+    walks through them in one guided pass for a first-time setup."""
+    from mazu.llm.client import _PROVIDER_DEFAULT_MODELS, _PROVIDERS
+
+    click.echo("Mazu setup -- let's get you connected to a model provider.\n")
+    provider_name = click.prompt(
+        "Which provider do you want to use?",
+        type=click.Choice(_SETUP_PROVIDER_CHOICES),
+        default="anthropic",
+    )
+    provider = _PROVIDERS[provider_name]
+    env_var = provider.api_key_env
+
+    key = click.prompt(f"Paste your {env_var}", hide_input=True)
+    config_key = f"{provider_name}_api_key"
+    set_config_value(config_key, key)
+    click.echo(f"Saved to {config_path()} (masked in `mazu config list`).\n")
+
+    if click.confirm("Verify this key works with a real API call now?", default=True):
+        import os
+
+        # Verifying in-process needs the key in the environment right now --
+        # set_config_value() only persists it to disk; env vars aren't re-read from
+        # config.toml until the next command's load_config() call.
+        os.environ[env_var] = key
+        model = _PROVIDER_DEFAULT_MODELS[provider_name]
+        result = check_live_api_key(provider_name, model)
+        click.echo(f"[{result.status.upper()}] {result.message}")
+        if result.status != "ok":
+            click.echo(
+                "The key is still saved -- fix and re-run `mazu setup`, or "
+                "`mazu config set` directly, whenever you're ready."
+            )
+        click.echo()
+
+    default_model_choice = _PROVIDER_DEFAULT_MODELS[provider_name]
+    if click.confirm(f"Set {default_model_choice} as your default model?", default=True):
+        set_config_value("default_model", default_model_choice)
+        click.echo(f"default_model set to {default_model_choice}.\n")
+
+    root = Path.cwd()
+    if not (root / ".mazu").exists():
+        if click.confirm(f"Initialize Mazu in the current directory ({root})?", default=True):
+            click.get_current_context().invoke(init)
+
+    click.echo('\nSetup complete. Try `mazu chat` or `mazu run "..."` to get started.')
 
 
 @main.command("models")
@@ -257,7 +319,7 @@ def chat(model: str | None, shell_allowlist: str | None) -> None:
     """Start an interactive chat session in the current directory."""
     ensure_api_key(model)
     root = Path.cwd()
-    _ensure_gitignore(root)
+    ensure_gitignore(root)
 
     memory_store = MemoryStore(_memory_db_path(root))
     global_memory_store = MemoryStore(_global_memory_db_path())
@@ -349,7 +411,7 @@ def run(
 ) -> None:
     """Run a task autonomously (multi-step, unattended), checkpointing along the way."""
     root = Path.cwd()
-    _ensure_gitignore(root)
+    ensure_gitignore(root)
     checkpoint_kwargs = {"retention": keep_checkpoints} if keep_checkpoints is not None else {}
     checkpoint_manager = CheckpointManager(root, **checkpoint_kwargs)
     run_store = RunStore(_runs_db_path(root))
@@ -474,7 +536,7 @@ def council(question: str, models: str, lead: str) -> None:
     ensure_api_key(lead)  # members that lack a configured key fail individually and are reported, not fatal
     print_banner()
     root = Path.cwd()
-    _ensure_gitignore(root)
+    ensure_gitignore(root)
 
     memory_store = MemoryStore(_memory_db_path(root))
     global_memory_store = MemoryStore(_global_memory_db_path())
@@ -513,7 +575,7 @@ def checkpoint(ctx: click.Context) -> None:
     if ctx.invoked_subcommand is not None:
         return
     root = Path.cwd()
-    _ensure_gitignore(root)
+    ensure_gitignore(root)
     checkpoint_manager = CheckpointManager(root)
     entry = checkpoint_manager.snapshot(messages=[], trigger="manual_cli")
     click.echo(f"Checkpoint {entry['id']} saved (commit {entry['git_commit'][:8]}).")

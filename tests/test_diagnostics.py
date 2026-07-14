@@ -1,8 +1,12 @@
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from mazu.diagnostics import (
+    apply_fixes,
     check_api_keys,
     check_git_available,
     check_gitignore,
@@ -10,6 +14,7 @@ from mazu.diagnostics import (
     check_openai_package,
     check_project_git_repo,
     check_python_version,
+    ensure_gitignore,
     run_diagnostics,
 )
 from mazu.llm.errors import MazuAuthError, MazuTransientError
@@ -205,3 +210,77 @@ def test_run_diagnostics_runs_live_check_only_for_configured_providers(tmp_path,
 
     called_providers = [call.args[0] for call in mock_live.call_args_list]
     assert called_providers == ["deepseek"]
+
+
+# ---------------------------------------------------------------------------
+# ensure_gitignore
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_gitignore_creates_file_when_absent(tmp_path: Path):
+    ensure_gitignore(tmp_path)
+    assert ".mazu/" in (tmp_path / ".gitignore").read_text(encoding="utf-8")
+
+
+def test_ensure_gitignore_appends_when_file_exists_without_entry(tmp_path: Path):
+    (tmp_path / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")
+    ensure_gitignore(tmp_path)
+    content = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    assert "__pycache__/" in content
+    assert ".mazu/" in content
+
+
+def test_ensure_gitignore_is_a_noop_when_already_present(tmp_path: Path):
+    (tmp_path / ".gitignore").write_text(".mazu/\n", encoding="utf-8")
+    before = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    ensure_gitignore(tmp_path)
+    after = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    assert before == after
+
+
+# ---------------------------------------------------------------------------
+# apply_fixes
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _git_identity(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    subprocess.run(["git", "config", "--global", "user.email", "test@example.com"])
+    subprocess.run(["git", "config", "--global", "user.name", "Test"])
+
+
+def test_apply_fixes_creates_missing_gitignore(tmp_path: Path):
+    fixed = apply_fixes(tmp_path)
+    assert any("gitignore" in f.lower() for f in fixed)
+    assert ".mazu/" in (tmp_path / ".gitignore").read_text(encoding="utf-8")
+
+
+def test_apply_fixes_initializes_git_repo(tmp_path: Path):
+    assert not (tmp_path / ".git").exists()
+    fixed = apply_fixes(tmp_path)
+    assert any("git repository" in f.lower() for f in fixed)
+    assert (tmp_path / ".git").exists()
+
+
+def test_apply_fixes_reports_nothing_when_already_correct(tmp_path: Path):
+    (tmp_path / ".gitignore").write_text(".mazu/\n", encoding="utf-8")
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+
+    fixed = apply_fixes(tmp_path)
+    assert fixed == []
+
+
+def test_apply_fixes_only_fixes_gitignore_when_git_already_initialized(tmp_path: Path):
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+
+    fixed = apply_fixes(tmp_path)
+    assert len(fixed) == 1
+    assert "gitignore" in fixed[0].lower()
+
+
+def test_apply_fixes_is_idempotent(tmp_path: Path):
+    apply_fixes(tmp_path)
+    second_pass = apply_fixes(tmp_path)
+    assert second_pass == []

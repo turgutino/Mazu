@@ -64,7 +64,15 @@ export GEMINI_API_KEY=...
 
 On Windows (PowerShell): `$env:ANTHROPIC_API_KEY = "sk-ant-..."`
 
-Something not working? `mazu doctor` (and `mazu doctor --live`) diagnoses the common causes — see [Diagnosing setup problems](#diagnosing-setup-problems) below.
+Or skip the manual steps above and run the guided wizard instead:
+
+```bash
+mazu setup
+```
+
+Walks through picking a provider, pasting its key (persisted to `~/.mazu/config.toml`, never printed back), optionally verifying it with one real API call, optionally setting it as your default model, and initializing the current directory — everything above, in one guided pass.
+
+Something not working? `mazu doctor` (and `mazu doctor --live`) diagnoses the common causes, and `mazu doctor --fix` auto-fixes what's safely fixable (a missing `.gitignore` entry, an uninitialized git repo) — see [Diagnosing setup problems](#diagnosing-setup-problems) below.
 
 ## Quick start
 
@@ -290,9 +298,12 @@ This captures the tool-call layer specifically — blocked (denylisted shell com
 ```bash
 mazu doctor          # checks Python/git, which provider keys are set, project readiness
 mazu doctor --live   # also makes one minimal real API call per configured key to confirm it actually works
+mazu doctor --fix    # auto-fixes what's safely fixable: missing .gitignore entry, uninitialized git repo
 ```
 
 Useful when `mazu chat`/`mazu run` fails and it's not obvious why — `mazu doctor --live` will tell you, for example, if a key is set but has been revoked (a plain "not set" check can't catch that, only an actual API call can).
+
+`--fix` deliberately only touches things that have exactly one correct answer and no downside — it never touches API keys, your Python installation, or installs packages, since those need a value or a decision only you have. Use `mazu setup` for API keys instead.
 
 ## Model naming
 

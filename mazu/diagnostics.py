@@ -6,6 +6,22 @@ from pathlib import Path
 
 MIN_PYTHON = (3, 11)
 
+GITIGNORE_ENTRY = ".mazu/"
+
+
+def ensure_gitignore(root: Path) -> None:
+    """Makes sure .gitignore excludes .mazu/ (project memory/checkpoints), creating
+    .gitignore if it doesn't exist yet. Called by every command that touches .mazu/
+    (init, chat, run, council) and by `mazu doctor --fix`.
+    """
+    gitignore = root / ".gitignore"
+    if gitignore.exists():
+        if GITIGNORE_ENTRY not in gitignore.read_text(encoding="utf-8"):
+            with open(gitignore, "a", encoding="utf-8") as f:
+                f.write(f"\n{GITIGNORE_ENTRY}\n")
+    else:
+        gitignore.write_text(f"{GITIGNORE_ENTRY}\n", encoding="utf-8")
+
 
 @dataclass
 class CheckResult:
@@ -152,3 +168,31 @@ def run_diagnostics(root: Path, live: bool = False) -> list[CheckResult]:
                     check_live_api_key(provider_name, _PROVIDER_DEFAULT_MODELS[provider_name])
                 )
     return results
+
+
+def apply_fixes(root: Path) -> list[str]:
+    """Auto-fixes the subset of `mazu doctor` problems that are safe to fix without
+    asking first -- a missing/incomplete .gitignore entry, and a project directory
+    that isn't a git repo yet (checkpoints need one). Deliberately does NOT touch
+    anything requiring a judgment call or a value only the user has (API keys,
+    Python version, installing packages) -- those stay report-only in `mazu doctor`,
+    or go through `mazu setup`/`mazu config set` instead. Returns a human-readable
+    description of each fix actually applied; empty if nothing needed fixing.
+    """
+    fixed = []
+
+    gitignore = root / ".gitignore"
+    gitignore_needs_fix = not gitignore.exists() or GITIGNORE_ENTRY not in gitignore.read_text(
+        encoding="utf-8"
+    )
+    if gitignore_needs_fix:
+        ensure_gitignore(root)
+        fixed.append(f"Added '{GITIGNORE_ENTRY}' to .gitignore")
+
+    if not (root / ".git").exists():
+        from mazu.checkpoint.manager import CheckpointManager
+
+        CheckpointManager(root).ensure_git_repo()
+        fixed.append("Initialized a git repository (needed for checkpoints)")
+
+    return fixed
