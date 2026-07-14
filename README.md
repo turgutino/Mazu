@@ -1,6 +1,10 @@
 # Mazu
 
+[![PyPI](https://img.shields.io/pypi/v/mazu)](https://pypi.org/project/mazu/) [![CI](https://github.com/turgutino/Mazu/actions/workflows/ci.yml/badge.svg)](https://github.com/turgutino/Mazu/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE) [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](pyproject.toml)
+
 **Mazu is a local memory and checkpoint layer for coding agents.**
+
+Alpha, but usable — the core loop (memory, checkpoints, rollback) has been exercised through live testing against real Anthropic/OpenAI/DeepSeek API keys and a 450+ test suite (see [Status & roadmap](#status--roadmap) for the honest gaps list, not just the wins).
 
 ```
   ███╗   ███╗
@@ -266,6 +270,8 @@ mazu ui
 
 An interactive, full-screen alternative to `mazu timeline`/`mazu memory list`/`mazu log` for browsing the same data — three tabs (Checkpoints, Memory, Action Log), navigated with arrow keys and Tab, not a separate mechanism from the CLI commands above. `r` on a checkpoint rolls back to it (confirmed first, same as `mazu rollback`); `p` on a memory pins/unpins it (same as `mazu memory pin`/`unpin`); selecting a session in the Action Log tab loads its individual tool calls below it. Every action goes through the exact same store methods the CLI commands use — this is a different way to reach the same operations, not a second implementation of them. Requires the `mazu[ui]` extra (see [Installation](#installation)) and an initialized project (`mazu init` first).
 
+<img src="docs/images/mazu-ui-checkpoints.svg" alt="mazu ui — Checkpoints tab" width="600"> <img src="docs/images/mazu-ui-memory.svg" alt="mazu ui — Memory tab" width="600">
+
 ### Skills
 
 ```bash
@@ -352,9 +358,10 @@ Lists every model Mazu knows about with real (token-by-token) streaming support,
 ## Safety model
 
 - All file tools are sandboxed to the project root — paths (including through symlinks) that resolve outside it are rejected.
-- Shell commands go through a shared denylist (destructive/irreversible patterns) in **both** `mazu chat` and `mazu run`, regardless of confirmation settings.
-- API keys are only ever read from environment variables or `~/.mazu/config.toml` (outside any repo) — Mazu never writes a key to disk itself, and `.mazu/`, `.env`, and `config.toml` are all gitignored by default.
-- `mazu run` refuses to start with uncommitted changes already present, so autonomous edits are always diffable against a clean baseline.
+- Shell commands go through a shared denylist (destructive/irreversible patterns, each with a human-readable reason) in **both** `mazu chat` and `mazu run`, regardless of confirmation settings — an opt-in `--shell-allowlist` narrows what's permitted further, but can't widen past the denylist.
+- `mazu run --dry-run` previews a task with real reasoning but no real writes/execution, for when you want to see the plan before trusting it with `--allow-shell` or unattended multi-step edits.
+- API keys are only ever read from environment variables or `~/.mazu/config.toml` (outside any repo) — Mazu never writes a key to disk itself, `mazu config list` masks every stored key to its last 4 characters, and `.mazu/`, `.env`, and `config.toml` are all gitignored by default.
+- `mazu run` refuses to start with uncommitted changes already present (unless `--dry-run`, which never writes anyway), so autonomous edits are always diffable against a clean baseline.
 - See [SECURITY.md](SECURITY.md) for the full policy and how to report a vulnerability.
 
 ## Architecture
@@ -363,7 +370,7 @@ The module map, the provider adapter seam, and how memory/checkpoints/skills fit
 
 ## Status & roadmap
 
-Milestones M1–M4 (bare tool loop, persistent memory, checkpoint/rollback, supervised autonomy) all have a working implementation, plus multi-provider support, council mode, real-time streaming (`mazu chat`), context compaction (`mazu run`), dry-run mode, shell allowlists, a persistent agent action log (`mazu log`), resumable runs (`mazu run --resume`), a model capability table (`mazu models`), persistent settings (`mazu config`), guided onboarding (`mazu setup`, `mazu doctor --fix`), and optional semantic memory search. This has been exercised through live testing against real Anthropic, OpenAI, and DeepSeek API keys (Gemini live-verified for authentication; full generation blocked on that key's zero free-tier quota — see known gaps), plus a test suite (400+ tests, zero API cost by default) running on every push via GitHub Actions across Python 3.11–3.13 on Linux/Windows/macOS. A [VS Code/Cursor extension design document](docs/vscode-extension-design.md) exists for a possible future editor integration — design only, not implemented.
+Milestones M1–M4 (bare tool loop, persistent memory, checkpoint/rollback, supervised autonomy) all have a working implementation, plus multi-provider support, council mode, real-time streaming (`mazu chat`), context compaction (`mazu run`), dry-run mode, shell allowlists, a persistent agent action log (`mazu log`), resumable runs (`mazu run --resume`), a model capability table (`mazu models`), persistent settings (`mazu config`), guided onboarding (`mazu setup`, `mazu doctor --fix`), a terminal UI (`mazu ui`), and optional semantic memory search. This has been exercised through live testing against real Anthropic, OpenAI, and DeepSeek API keys (Gemini live-verified for authentication; full generation blocked on that key's zero free-tier quota — see known gaps), plus a test suite (459 tests, zero API cost by default) running on every push via GitHub Actions across Python 3.11–3.13 on Linux/Windows/macOS. A [VS Code/Cursor extension design document](docs/vscode-extension-design.md) exists for a possible future editor integration — design only, not implemented; [CHANGELOG.md](CHANGELOG.md) has the version-by-version history.
 
 **Known gaps, honestly listed:**
 - Semantic search's 50/50 BM25/embedding blend weight is a fixed constant, not tuned against real usage data.

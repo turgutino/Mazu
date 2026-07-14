@@ -69,6 +69,13 @@ This file is split into two parts on purpose:
 ### Phase L — VS Code / Cursor extension (plan only, for now) ✅ design doc done
 - [x] Written design doc — [docs/vscode-extension-design.md](../docs/vscode-extension-design.md). Done ahead of Phase K at the user's explicit request (normally sequenced after it); this is a separate project in its own right (different language/tooling), not a Mazu CLI feature, so implementation is still out of scope until there's a reason to believe people want it. The design pass surfaced a concrete, real prerequisite: Mazu has no machine-readable (`--json`) output today — every command is human-formatted text — so an extension has nothing stable to integrate against yet. That's flagged in the doc as its own future ROADMAP item, not silently assumed away.
 
+### Phase M — Machine-readable output (`--json`)
+- [ ] `--json` on the read-oriented commands an integration would actually call: `mazu timeline`, `mazu memory list`, `mazu log`/`mazu log show`, `mazu runs`, `mazu models`. Serializes the same `dict`/`list[dict]` the Python layer underneath `cli.py` already produces (`MemoryStore`, `CheckpointManager`, `ActionLogStore`, `RunStore` methods never returned pre-formatted strings — only `cli.py`'s `click.echo()` calls do) — this is a serialization change, not a new data layer.
+- [ ] Structured (not just `--stat`) diff data for `mazu checkpoint diff`/`compare`/`preview_rollback` — currently these wrap `git diff --stat` as text; a real `--json` consumer needs per-file `{path, status, additions, deletions}`, which means parsing `git diff --numstat`/`--name-status` instead, a genuinely separate piece of work from adding `--json` to the already-structured commands above.
+- [ ] Version the output shape the same way the CLI itself is versioned (`mazu --version`), so a consumer (e.g. a future VS Code extension, see Phase L) can declare a minimum compatible Mazu version and fail loudly on a mismatch instead of silently misparsing.
+
+This exists because Phase L's design pass found a concrete blocker, not because JSON output is valuable in the abstract: today, anything wanting structured data out of Mazu has to either parse human-formatted terminal text (fragile — nothing currently protects that text from changing) or read the SQLite files directly (couples the caller to an internal schema with no stability promise). Not required before sharing Mazu as a CLI tool; required before anyone can build a serious editor integration on top of it.
+
 ## Directional (not committed — needs a second audience first)
 
 - **Team/shared-memory mode** (shared project memory export/import, approved-memory workflow) — premature for a single-user tool
