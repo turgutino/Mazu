@@ -2,6 +2,10 @@
 
 All notable changes to Mazu are documented here, newest first. Format loosely follows [Keep a Changelog](https://keepachangelog.com/); Mazu doesn't yet promise strict semver (see [ROADMAP.md](ROADMAP.md) for what "1.0" would mean) — treat version bumps as "a meaningful batch of work shipped," not a compatibility contract.
 
+## 0.16.2 — Fix Windows subprocess crashes on non-ASCII output
+
+- **Fixed:** a real bug found via live testing, observed twice independently (once with an emoji in a generated print statement, once with a Turkish/Azerbaijani letter in a saved skill) — on Windows, a subprocess spawned by `run_shell` or a saved skill defaults to the console's legacy codepage for its own stdout, not UTF-8, so printing non-ASCII text crashed the *subprocess itself* with `UnicodeEncodeError`. The model would then have to notice and fix this in an extra round, wasting a step and tokens every time. Both `mazu/tools/shell.py::run_shell` and `mazu/skills/manager.py::SkillManager.run` now set `PYTHONIOENCODING=utf-8`/`PYTHONUTF8=1` for the subprocess environment, and capture stdout/stderr with explicit `encoding="utf-8", errors="replace"` (previously relied on `text=True`'s locale-dependent decoding).
+
 ## 0.16.1 — Fix misleading `mazu timeline` message
 
 - **Fixed:** a real bug found via live testing (a real `mazu run --allow-shell` session), not a hypothetical one — `mazu timeline` printed "(first checkpoint — nothing to compare against)" for *any* checkpoint with no changed files, even when it had a real parent and that round simply didn't touch any tracked file (e.g. a read-only/inspection-only tool round). Now distinguishes "true root, nothing to diff against" from "a real predecessor exists, but nothing changed this round" — confirmed live: an 8-checkpoint autonomous run showed steps 7 and 8 as false "first checkpoints" before this fix.

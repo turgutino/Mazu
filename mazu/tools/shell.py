@@ -1,3 +1,4 @@
+import os
 import platform
 import re
 import subprocess
@@ -66,8 +67,21 @@ def make_shell_tool(root: Path, timeout: int = 60, dry_run: bool = False) -> Too
                 shell=True,
                 cwd=root,
                 capture_output=True,
-                text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout,
+                # Real bug found via live testing (twice, independently -- once with
+                # an emoji in a generated print statement, once with a Turkish/
+                # Azerbaijani letter): on Windows, a spawned Python script's own
+                # stdout defaults to the console's legacy codepage (cp1252), not
+                # UTF-8, so printing non-ASCII text crashes the *subprocess* with
+                # its own UnicodeEncodeError -- a failure the model then has to
+                # notice and fix in a follow-up round, wasting a step. Setting
+                # PYTHONIOENCODING here fixes it at the source for any Python
+                # subprocess `run_shell` launches, on top of `encoding`/`errors`
+                # above, which only make *our own* capture of stdout/stderr safe,
+                # not the subprocess's own internal print() calls.
+                env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"},
             )
             output = proc.stdout
             if proc.stderr:

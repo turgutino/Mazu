@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -82,8 +83,16 @@ class SkillManager:
                 input=json.dumps(args),
                 cwd=self.root,
                 capture_output=True,
-                text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout,
+                # Same fix as run_shell (mazu/tools/shell.py): on Windows, a skill
+                # script's own stdout defaults to the console's legacy codepage, not
+                # UTF-8, so printing non-ASCII text (an emoji, a Turkish/Azerbaijani
+                # letter) crashes the skill subprocess itself with its own
+                # UnicodeEncodeError -- a real, observed failure during live
+                # testing, not a hypothetical one.
+                env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"},
             )
         except subprocess.TimeoutExpired:
             return f"Skill '{name}' timed out after {timeout}s", True

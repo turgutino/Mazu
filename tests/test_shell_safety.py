@@ -112,3 +112,22 @@ def test_non_dry_run_shell_tool_still_executes_for_real(tmp_path: Path):
     result = tool.handler({"command": "echo hello"})
     assert not result.is_error
     assert "hello" in result.content
+
+
+def test_shell_tool_handles_non_ascii_subprocess_output_without_crashing(tmp_path: Path):
+    """Regression test for a real bug found via live testing (twice, independently:
+    an emoji in a generated print statement, then a Turkish/Azerbaijani letter): on
+    Windows, a spawned Python subprocess's own stdout defaults to the console's
+    legacy codepage, not UTF-8, so printing non-ASCII text used to crash the
+    *subprocess* itself with its own UnicodeEncodeError. PYTHONIOENCODING is now set
+    for every run_shell subprocess to prevent this at the source.
+    """
+    tool = make_shell_tool(tmp_path, dry_run=False)
+    # chr(0x1F600) is an emoji (grinning face); chr(305) is Turkish/Azerbaijani
+    # dotless lowercase "ı" -- both previously observed to crash a subprocess.
+    result = tool.handler(
+        {"command": f'python -c "print(chr({0x1F600})); print(chr({305}))"'}
+    )
+    assert not result.is_error
+    assert chr(0x1F600) in result.content
+    assert chr(305) in result.content
