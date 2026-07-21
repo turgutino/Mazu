@@ -180,6 +180,17 @@ def test_long_running_server_reason_missing_script_file_is_safe(tmp_path: Path):
     assert long_running_server_reason("python does_not_exist.py", tmp_path) is None
 
 
+def test_long_running_server_reason_works_with_unresolved_relative_root(tmp_path: Path, monkeypatch):
+    """Regression test: an unresolved/relative root (e.g. a bare Path(".")) must not
+    silently defeat the root-containment check -- every real call site passes
+    Path.cwd() (already absolute), but the function itself must not depend on that.
+    """
+    (tmp_path / "app.py").write_text("app.run(debug=True)\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    reason = long_running_server_reason("python app.py", Path("."))
+    assert reason is not None
+
+
 def test_shell_tool_blocks_server_command_without_running_it(tmp_path: Path):
     (tmp_path / "app.py").write_text(
         "from flask import Flask\napp = Flask(__name__)\napp.run(debug=True)\n",

@@ -103,6 +103,12 @@ def _bare_python_script_target(command: str, root: Path) -> Path | None:
     if match is None:
         return None
     try:
+        # Resolve root itself too, not just the candidate script -- every real call
+        # site passes Path.cwd() (already absolute), but a caller passing a relative
+        # or unresolved root would otherwise silently fail this containment check
+        # (an unresolved root Path can never equal/appear in an absolute resolved
+        # path's .parents), making this check a silent no-op rather than a real one.
+        root = root.resolve()
         resolved = (root / match.group(2)).resolve()
     except OSError:
         return None
