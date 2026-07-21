@@ -88,6 +88,11 @@ This exists because Phase L's design pass found a concrete blocker, not because 
 - [x] Crash-safe (atomic) `write_file`/`edit_file` — write-to-temp-then-`os.replace` so a process/machine crash mid-write can never leave a corrupted file at the real path.
 - [x] A real bug found via live testing (not a hypothetical): council members that answered without ever using a tool skipped cost-tracking entirely, silently disabling `--max-cost` for the common no-tool-use case. Fixed and covered by a regression test.
 
+### Phase P — Windows/live-testing robustness fixes ✅ done
+- [x] Fixed a real bug found via live testing: `mazu timeline` printed "(first checkpoint — nothing to compare against)" for any checkpoint with no changed files, even one with a real parent that simply didn't touch a tracked file that round. Now distinguishes true roots from "nothing changed this round."
+- [x] Fixed a real bug found via live testing (twice, independently): a subprocess spawned by `run_shell` or a saved skill crashed with `UnicodeEncodeError` printing non-ASCII text (an emoji, a Turkish/Azerbaijani letter) on Windows, since a spawned process's own stdout defaults to the console's legacy codepage, not UTF-8. Both call sites now set `PYTHONIOENCODING=utf-8`.
+- [x] `run_shell` now detects commands that start a long-running dev server (`flask run`, `npm run dev`, bare `python <file>.py` whose source calls `app.run(...)`, etc.) and refuses to run them with an immediate, clear message, instead of blocking for the full timeout — found live when a model tried `python app.py` to test a Flask site, which the user had to manually interrupt.
+
 ## Directional (not committed — needs a second audience first)
 
 - **Team/shared-memory mode** (shared project memory export/import, approved-memory workflow) — premature for a single-user tool

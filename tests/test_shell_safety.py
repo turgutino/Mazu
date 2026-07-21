@@ -4,6 +4,7 @@ from mazu.tools.shell import (
     denylist_reason,
     is_allowed_by_shell_allowlist,
     is_denied_shell_command,
+    long_running_server_reason,
     make_shell_tool,
 )
 
@@ -112,6 +113,83 @@ def test_non_dry_run_shell_tool_still_executes_for_real(tmp_path: Path):
     result = tool.handler({"command": "echo hello"})
     assert not result.is_error
     assert "hello" in result.content
+
+
+# ---------------------------------------------------------------------------
+# long_running_server_reason -- real bug found via live testing: python app.py
+# (a Flask dev server) blocked run_shell until the user manually interrupted the
+# whole mazu process, since a server never exits on its own.
+# ---------------------------------------------------------------------------
+
+
+def test_long_running_server_reason_none_for_ordinary_commands(tmp_path: Path):
+    assert long_running_server_reason("git status", tmp_path) is None
+    assert long_running_server_reason("npm test", tmp_path) is None
+    assert long_running_server_reason("npm run build", tmp_path) is None
+    assert long_running_server_reason("pytest -q", tmp_path) is None
+
+
+def test_long_running_server_reason_matches_command_line_patterns(tmp_path: Path):
+    assert long_running_server_reason("flask run", tmp_path) is not None
+    assert long_running_server_reason("npm run dev", tmp_path) is not None
+    assert long_running_server_reason("npm start", tmp_path) is not None
+    assert long_running_server_reason("yarn dev", tmp_path) is not None
+    assert long_running_server_reason("vite", tmp_path) is not None
+    assert long_running_server_reason("next dev", tmp_path) is not None
+    assert long_running_server_reason("uvicorn app:app", tmp_path) is not None
+    assert long_running_server_reason("gunicorn app:app", tmp_path) is not None
+    assert long_running_server_reason("python -m http.server 8000", tmp_path) is not None
+    assert long_running_server_reason("python manage.py runserver", tmp_path) is not None
+    assert long_running_server_reason("rails server", tmp_path) is not None
+
+
+def test_long_running_server_reason_vite_build_is_not_flagged(tmp_path: Path):
+    # "vite build" finishes on its own -- only bare "vite" (implicitly the dev
+    # server) should be flagged.
+    assert long_running_server_reason("vite build", tmp_path) is None
+
+
+def test_long_running_server_reason_inspects_bare_python_script_source(tmp_path: Path):
+    """The real bug: `python app.py` gives no hint on the command line itself that
+    app.py starts a Flask server -- that only shows up in the file's own source.
+    """
+    (tmp_path / "app.py").write_text(
+        "from flask import Flask\napp = Flask(__name__)\napp.run(debug=True)\n",
+        encoding="utf-8",
+    )
+    reason = long_running_server_reason("python app.py", tmp_path)
+    assert reason is not None
+    assert "app.py" in reason
+
+
+def test_long_running_server_reason_bare_python_script_without_server_signature(tmp_path: Path):
+    (tmp_path / "one.py").write_text("print('hello')\n", encoding="utf-8")
+    assert long_running_server_reason("python one.py", tmp_path) is None
+
+
+def test_long_running_server_reason_ignores_compound_commands(tmp_path: Path):
+    # The bare-script source check only applies to a command that is EXACTLY
+    # `python <file>.py` -- a compound command (&&, extra args) isn't parsed for a
+    # target file, so it falls through unflagged (a known, accepted false negative).
+    (tmp_path / "app.py").write_text("app.run(debug=True)\n", encoding="utf-8")
+    assert long_running_server_reason("cd sub && python app.py", tmp_path) is None
+    assert long_running_server_reason("python app.py --port 8080", tmp_path) is None
+
+
+def test_long_running_server_reason_missing_script_file_is_safe(tmp_path: Path):
+    assert long_running_server_reason("python does_not_exist.py", tmp_path) is None
+
+
+def test_shell_tool_blocks_server_command_without_running_it(tmp_path: Path):
+    (tmp_path / "app.py").write_text(
+        "from flask import Flask\napp = Flask(__name__)\napp.run(debug=True)\n",
+        encoding="utf-8",
+    )
+    tool = make_shell_tool(tmp_path, dry_run=False)
+    result = tool.handler({"command": "python app.py"})
+    assert result.is_error
+    assert "Not run" in result.content
+    assert "own terminal" in result.content
 
 
 def test_shell_tool_handles_non_ascii_subprocess_output_without_crashing(tmp_path: Path):
