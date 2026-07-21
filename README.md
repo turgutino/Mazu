@@ -324,6 +324,10 @@ mazu log show <session_id>     # every tool call in that session, in order, with
 
 This captures the tool-call layer specifically — blocked (denylisted shell command), declined (you said no to a confirmation prompt), and unknown-tool cases are all recorded too, not just successful calls, so a `mazu log show` after a confusing run tells you exactly where and why something didn't happen the way you expected.
 
+### Machine-readable output
+
+`mazu timeline`, `mazu memory list`, `mazu log`/`mazu log show`, `mazu runs`, and `mazu models` all accept `--json` — the same data the formatted-text view shows, wrapped in a versioned envelope (`{"schema_version": 1, "mazu_version": "...", "data": ...}`) instead of parsed out of terminal text. Useful for scripting or a future editor integration; `mazu log`'s `--json` is a group-level flag, so it goes before the subcommand (`mazu log --json show <session_id>`, not after).
+
 ### Diagnosing setup problems
 
 ```bash
@@ -382,7 +386,7 @@ The module map, the provider adapter seam, and how memory/checkpoints/skills fit
 
 ## Status & roadmap
 
-Milestones M1–M4 (bare tool loop, persistent memory, checkpoint/rollback, supervised autonomy) all have a working implementation, plus multi-provider support, council mode, real-time streaming (`mazu chat`), context compaction (`mazu run`), dry-run mode, shell allowlists, a persistent agent action log (`mazu log`), resumable runs (`mazu run --resume`), a model capability table (`mazu models`), persistent settings (`mazu config`), guided onboarding (`mazu setup`, `mazu doctor --fix`), a terminal UI (`mazu ui`), and optional semantic memory search. This has been exercised through live testing against real Anthropic, OpenAI, and DeepSeek API keys (Gemini live-verified for authentication; full generation blocked on that key's zero free-tier quota — see known gaps), plus a test suite (525 tests, zero API cost by default) running on every push via GitHub Actions across Python 3.11–3.13 on Linux/Windows/macOS. A [VS Code/Cursor extension design document](docs/vscode-extension-design.md) exists for a possible future editor integration — design only, not implemented; [CHANGELOG.md](CHANGELOG.md) has the version-by-version history.
+Milestones M1–M4 (bare tool loop, persistent memory, checkpoint/rollback, supervised autonomy) all have a working implementation, plus multi-provider support, council mode, real-time streaming (`mazu chat`), context compaction (`mazu run`), dry-run mode, shell allowlists, a persistent agent action log (`mazu log`), resumable runs (`mazu run --resume`), a model capability table (`mazu models`), persistent settings (`mazu config`), guided onboarding (`mazu setup`, `mazu doctor --fix`), a terminal UI (`mazu ui`), and optional semantic memory search. This has been exercised through live testing against real Anthropic, OpenAI, and DeepSeek API keys (Gemini live-verified for authentication; full generation blocked on that key's zero free-tier quota — see known gaps), plus a test suite (544 tests, zero API cost by default) running on every push via GitHub Actions across Python 3.11–3.13 on Linux/Windows/macOS. A [VS Code/Cursor extension design document](docs/vscode-extension-design.md) exists for a possible future editor integration — design only, not implemented; [CHANGELOG.md](CHANGELOG.md) has the version-by-version history.
 
 **Known gaps, honestly listed:**
 - Semantic search's 50/50 BM25/embedding blend weight is a fixed constant, not tuned against real usage data.

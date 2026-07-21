@@ -1,3 +1,4 @@
+import dataclasses
 import sys
 import uuid
 from pathlib import Path
@@ -24,6 +25,7 @@ from mazu.llm.capabilities import list_capabilities
 from mazu.memory.consolidate import apply_consolidation, find_duplicate_clusters
 from mazu.memory.retrieval import explain_retrieval
 from mazu.memory.store import FUZZY_DUPLICATE_THRESHOLD, MemoryStore
+from mazu.output import emit_json, row_to_dict
 from mazu.runs.store import RunStore
 from mazu.skills.manager import SkillManager
 from mazu.tools.fs import make_fs_tools
@@ -234,12 +236,25 @@ def setup_wizard() -> None:
     click.echo('\nSetup complete. Try `mazu chat` or `mazu run "..."` to get started.')
 
 
+MODELS_DISCLAIMER = (
+    "Context windows and pricing are best-effort (see mazu/llm/capabilities.py, "
+    "mazu/llm/pricing.py) and may be stale -- treat as approximate."
+)
+
+
 @main.command("models")
-def models_cmd() -> None:
+@click.option(
+    "--json", "as_json", is_flag=True, default=False,
+    help="Emit machine-readable JSON instead of formatted text.",
+)
+def models_cmd(as_json: bool) -> None:
     """Show what Mazu knows about each provider/model: real streaming support, tool
     use, context window, and approximate pricing. Best-effort and may go stale --
     verify against your provider's own docs before relying on it for capacity planning."""
     rows = list_capabilities()
+    if as_json:
+        emit_json({"models": [dataclasses.asdict(r) for r in rows], "note": MODELS_DISCLAIMER})
+        return
     click.echo(f"{'MODEL':<32} {'STREAM':<7} {'TOOLS':<6} {'CONTEXT':<10} {'$/1M IN':<9} {'$/1M OUT'}")
     for r in rows:
         key = f"{r.provider}:{r.model}"
@@ -249,10 +264,7 @@ def models_cmd() -> None:
         price_in = f"${r.input_price_per_million:.2f}" if r.input_price_per_million is not None else "?"
         price_out = f"${r.output_price_per_million:.2f}" if r.output_price_per_million is not None else "?"
         click.echo(f"{key:<32} {stream:<7} {tools:<6} {ctx:<10} {price_in:<9} {price_out}")
-    click.echo(
-        "\nContext windows and pricing are best-effort (see mazu/llm/capabilities.py, "
-        "mazu/llm/pricing.py) and may be stale -- treat as approximate."
-    )
+    click.echo(f"\n{MODELS_DISCLAIMER}")
 
 
 def _mask_secret(value: str) -> str:
@@ -552,12 +564,27 @@ def run(
 
 @main.command("runs")
 @click.option("--limit", default=20, show_default=True, type=int)
-def runs_cmd(limit: int) -> None:
+@click.option(
+    "--json", "as_json", is_flag=True, default=False,
+    help="Emit machine-readable JSON instead of formatted text.",
+)
+def runs_cmd(limit: int, as_json: bool) -> None:
     """List recent `mazu run` invocations: id, status, stop reason, step progress."""
     root = Path.cwd()
     store = RunStore(_runs_db_path(root))
     rows = store.list_runs(limit=limit)
     store.close()
+    if as_json:
+        emit_json(
+            [
+                {
+                    **row_to_dict(r, bool_fields=("dry_run", "allow_shell")),
+                    "shell_allowlist": r["shell_allowlist"].split(",") if r["shell_allowlist"] else [],
+                }
+                for r in rows
+            ]
+        )
+        return
     if not rows:
         click.echo("No runs recorded yet.")
         return
@@ -894,13 +921,25 @@ def checkpoint_prune(keep: int | None) -> None:
 
 
 @main.command("timeline")
-def timeline() -> None:
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    default=False,
+    help="Emit machine-readable JSON instead of formatted text. Note: branch/"
+    "parent_checkpoint_id may be entirely absent (not just null) on checkpoints "
+    "recorded before branching support existed.",
+)
+def timeline(as_json: bool) -> None:
     """Readable history of every checkpoint: what changed since the previous one,
     and whether a memory/skills snapshot exists — a step-by-step view, not just a
     flat id list (see `mazu checkpoint list` for that)."""
     root = Path.cwd()
     checkpoint_manager = CheckpointManager(root)
     entries = checkpoint_manager.timeline_entries()
+    if as_json:
+        emit_json(entries)
+        return
     if not entries:
         click.echo("No checkpoints yet.")
         return
@@ -974,18 +1013,29 @@ def usage_cmd(since_days: int | None) -> None:
 
 
 @main.group(invoke_without_command=True)
+@click.option(
+    "--json", "as_json", is_flag=True, default=False,
+    help="Emit machine-readable JSON instead of formatted text. Must come before "
+    "the subcommand (a group-level flag): `mazu log --json show <id>`, not "
+    "`mazu log show <id> --json`.",
+)
 @click.pass_context
-def log(ctx: click.Context) -> None:
+def log(ctx: click.Context, as_json: bool) -> None:
     """Inspect the persistent agent action log: every tool call, across every
     session, in this project. With no subcommand, lists recent sessions."""
+    ctx.ensure_object(dict)
+    ctx.obj["as_json"] = as_json
     if ctx.invoked_subcommand is None:
-        _print_recent_sessions()
+        _print_recent_sessions(as_json)
 
 
-def _print_recent_sessions() -> None:
+def _print_recent_sessions(as_json: bool = False) -> None:
     store = ActionLogStore(_action_log_db_path(Path.cwd()))
     sessions = store.list_sessions()
     store.close()
+    if as_json:
+        emit_json([row_to_dict(s) for s in sessions])
+        return
     if not sessions:
         click.echo("No actions recorded yet.")
         return
@@ -998,12 +1048,17 @@ def _print_recent_sessions() -> None:
 
 @log.command("show")
 @click.argument("session_id")
-def log_show(session_id: str) -> None:
+@click.pass_context
+def log_show(ctx: click.Context, session_id: str) -> None:
     """Show the full action log for one session: every tool call, its input, outcome,
     and output, in order."""
+    as_json = ctx.obj.get("as_json", False) if ctx.obj else False
     store = ActionLogStore(_action_log_db_path(Path.cwd()))
     actions = store.session_actions(session_id)
     store.close()
+    if as_json:
+        emit_json([row_to_dict(a) for a in actions])
+        return
     if not actions:
         click.echo(f"No actions recorded for session {session_id}.")
         return
@@ -1050,12 +1105,28 @@ def memory() -> None:
     default=False,
     help="List the global store (user_preference facts shared across every project) instead of this project's.",
 )
-def memory_list(category: str | None, use_global: bool) -> None:
+@click.option(
+    "--json", "as_json", is_flag=True, default=False,
+    help="Emit machine-readable JSON instead of formatted text.",
+)
+def memory_list(category: str | None, use_global: bool, as_json: bool) -> None:
     """List stored memories for the current project."""
     db_path = _global_memory_db_path() if use_global else _memory_db_path(Path.cwd())
     store = MemoryStore(db_path)
     rows = store.search(category=category, limit=200)
     store.close()
+    if as_json:
+        memory_dicts = []
+        for r in rows:
+            d = row_to_dict(r, bool_fields=("pinned",))
+            # embedding is an internal representation detail (only populated with
+            # MAZU_SEMANTIC_MEMORY=1), not something a --json consumer needs -- exclude
+            # it explicitly rather than relying on search()'s SELECT * to omit it (it
+            # doesn't; SELECT * includes every column, embedding included).
+            d.pop("embedding", None)
+            memory_dicts.append(d)
+        emit_json(memory_dicts)
+        return
     if not rows:
         click.echo("No memories stored yet.")
         return

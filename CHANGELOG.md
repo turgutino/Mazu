@@ -2,6 +2,13 @@
 
 All notable changes to Mazu are documented here, newest first. Format loosely follows [Keep a Changelog](https://keepachangelog.com/); Mazu doesn't yet promise strict semver (see [ROADMAP.md](ROADMAP.md) for what "1.0" would mean) — treat version bumps as "a meaningful batch of work shipped," not a compatibility contract.
 
+## 0.16.0 — Machine-readable output (`--json`)
+
+- **Added:** `--json` on the five read-oriented commands ROADMAP's Phase M names as what an integration would actually call: `mazu timeline`, `mazu memory list`, `mazu log`/`mazu log show`, `mazu runs`, `mazu models`. Every payload is wrapped in a versioned envelope (`{"schema_version": 1, "mazu_version": ..., "data": ...}`) via a new small `mazu/output.py` module, so a consumer can check compatibility instead of silently misparsing a future change.
+- **Added:** `mazu runs --json` is the first time the run-lineage columns added for branching checkpoints (`origin_checkpoint_id`, `parent_run_id`, `branch_name`) become visible through the CLI in any form — the text output never printed them.
+- **Fixed (caught during implementation, not shipped):** the initial plan assumed `mazu memory list`'s underlying query never selects the `embedding` column; it does (`SELECT *`). Explicitly excluded it from `--json` output rather than leaking an internal representation detail, verified live before merging.
+- **Note:** structured (non-`--stat`) diff data for `mazu checkpoint diff`/`compare`/`preview_rollback` remains deliberately deferred — a separate, later piece of work per ROADMAP's own scoping.
+
 ## 0.15.0 — Cost-efficiency hardening + crash-safe writes
 
 - **Added:** multi-breakpoint Anthropic prompt caching — the tool schema list and the last message of the conversation now get `cache_control` breakpoints too, not just the system prompt. Live-verified against a real multi-step `mazu run`: after the first step, each subsequent step showed only ~2 fresh input tokens with 3,900+ read from cache, instead of re-processing the whole growing tool/message set every step. `run_forced_tool` (used by memory extraction and context compaction) also gained system-prompt caching, which it was previously missing entirely.
