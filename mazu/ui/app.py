@@ -109,11 +109,11 @@ class MazuApp(App):
     def reload_checkpoints(self) -> None:
         table = self.query_one("#checkpoint_table", DataTable)
         table.clear(columns=True)
-        table.add_columns("ID", "Created", "Trigger", "Files changed")
+        table.add_columns("ID", "Branch", "Created", "Trigger", "Files changed")
         self._checkpoints = load_checkpoints(self.checkpoint_manager)
         for cp in self._checkpoints:
             table.add_row(
-                cp.id, cp.created_at, cp.trigger, ", ".join(cp.files_changed) or "-", key=cp.id
+                cp.id, cp.branch, cp.created_at, cp.trigger, ", ".join(cp.files_changed) or "-", key=cp.id
             )
 
     def action_rollback_selected(self) -> None:

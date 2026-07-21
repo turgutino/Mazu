@@ -2,6 +2,20 @@
 
 All notable changes to Mazu are documented here, newest first. Format loosely follows [Keep a Changelog](https://keepachangelog.com/); Mazu doesn't yet promise strict semver (see [ROADMAP.md](ROADMAP.md) for what "1.0" would mean) — treat version bumps as "a meaningful batch of work shipped," not a compatibility contract.
 
+## 0.15.0 — Cost-efficiency hardening + crash-safe writes
+
+- **Added:** multi-breakpoint Anthropic prompt caching — the tool schema list and the last message of the conversation now get `cache_control` breakpoints too, not just the system prompt. Live-verified against a real multi-step `mazu run`: after the first step, each subsequent step showed only ~2 fresh input tokens with 3,900+ read from cache, instead of re-processing the whole growing tool/message set every step. `run_forced_tool` (used by memory extraction and context compaction) also gained system-prompt caching, which it was previously missing entirely.
+- **Added:** `openai:gpt-4o`, `openai:gpt-4o-mini`, and `gemini:gemini-2.0-flash` to the pricing table — `--max-cost`, `mazu usage`, and `mazu models` were previously silently blind to these models (best-effort rates, flagged for verification against provider docs).
+- **Added:** `mazu council --max-cost <usd>` — a thread-safe shared spend cap across all council members (previously council mode had zero cost guardrail of any kind, unlike `mazu run`). When the budget is exhausted, members stop taking further rounds and the lead synthesis call is skipped with a clear message instead of firing a full-price call over budget. Always-on `[cost]` line now shown at the start of every council run, regardless of whether `--max-cost` is set.
+- **Added:** crash-safe (atomic) writes for `write_file`/`edit_file` — both now write to a temp file in the same directory, fsync it, then atomically rename it onto the real path. If the process or machine dies mid-write, the original file is left fully intact rather than truncated or corrupted.
+- **Fixed:** a real bug found via live testing — council members that answered a question directly without ever using a tool (the common case for simple questions) skipped the cost-tracking check entirely, silently letting `--max-cost` do nothing for that member. The check now runs for every round unconditionally; only the decision to take another round is gated by budget exhaustion.
+
+## 0.14.0 — Branching checkpoints
+
+- **Added:** `mazu run --from-checkpoint <id> --branch <name> "<task>"` — forks a new, divergent line of execution from any existing checkpoint (git branch + `memory.db` + `.mazu/skills/` restored onto it, brand-new run/session id) and runs a task on it. Unlike `--resume`, this is not a continuation: the origin branch's later checkpoints are left completely untouched. Built on `CheckpointManager.branch_from()` (existing, git-only) plus a new `fork()` that adds the state restore, reusing `restore()`'s own logic rather than duplicating it.
+- **Added:** `mazu checkpoint compare-branches <run_id_a> <run_id_b>` — status/steps/stop-reason/memories-saved/estimated-cost for two runs side by side, plus a real diff between their final checkpointed states and their common ancestor checkpoint (if the two share one).
+- **Fixed:** three places that silently assumed checkpoint history was one linear chain, which only breaks once a divergent branch actually exists — caught and fixed as part of this addition rather than discovered later: `mazu checkpoint prune` could delete a divergent branch's only checkpoints just because the main line produced more newer ones in the meantime; `mazu timeline` diffed a checkpoint against whichever entry happened to sit next to it in the flat index instead of its real git parent; a no-argument `mazu rollback` could target a checkpoint actually made on a different branch. All three are fixed via two new additive index-entry fields (`branch`, `parent_checkpoint_id`) that older checkpoints simply lack — existing single-branch projects see byte-identical output.
+
 ## 0.13.1 — Launch readiness
 
 - **Added:** this file.

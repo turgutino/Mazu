@@ -220,6 +220,18 @@ mazu branch-from cp_000003 my-experiment           # new git branch at that comm
 
 `branch-from` is deliberately lighter than `mazu rollback`: it only creates a git branch pointer, it never resets your working tree or restores memory/skills, and your current branch stays checked out. It's for exploring "what if I'd gone a different way from here" without the heavier, stateful implications of a full rollback — switch into it yourself with `git checkout my-experiment` when you're ready.
 
+For the stateful version — actually running a divergent task from a checkpoint, not just marking where it started — fork and run in one step:
+
+```bash
+mazu run --from-checkpoint cp_000003 --branch try-postgres "switch the storage layer to Postgres"
+```
+
+This checks out a new branch at that checkpoint's commit, restores its `memory.db`/skills snapshot onto it, and runs the given task as a brand-new run (its own run id, its own checkpoints) — the origin branch's later history is left completely alone, unlike `mazu run --resume` which continues the *same* run. Once you have two runs that forked from a shared ancestor, compare what each one actually did:
+
+```bash
+mazu checkpoint compare-branches <run_id_a> <run_id_b>   # status, steps, cost, memories saved, and a real diff, side by side
+```
+
 ### Memory
 
 ```bash
@@ -370,11 +382,11 @@ The module map, the provider adapter seam, and how memory/checkpoints/skills fit
 
 ## Status & roadmap
 
-Milestones M1–M4 (bare tool loop, persistent memory, checkpoint/rollback, supervised autonomy) all have a working implementation, plus multi-provider support, council mode, real-time streaming (`mazu chat`), context compaction (`mazu run`), dry-run mode, shell allowlists, a persistent agent action log (`mazu log`), resumable runs (`mazu run --resume`), a model capability table (`mazu models`), persistent settings (`mazu config`), guided onboarding (`mazu setup`, `mazu doctor --fix`), a terminal UI (`mazu ui`), and optional semantic memory search. This has been exercised through live testing against real Anthropic, OpenAI, and DeepSeek API keys (Gemini live-verified for authentication; full generation blocked on that key's zero free-tier quota — see known gaps), plus a test suite (459 tests, zero API cost by default) running on every push via GitHub Actions across Python 3.11–3.13 on Linux/Windows/macOS. A [VS Code/Cursor extension design document](docs/vscode-extension-design.md) exists for a possible future editor integration — design only, not implemented; [CHANGELOG.md](CHANGELOG.md) has the version-by-version history.
+Milestones M1–M4 (bare tool loop, persistent memory, checkpoint/rollback, supervised autonomy) all have a working implementation, plus multi-provider support, council mode, real-time streaming (`mazu chat`), context compaction (`mazu run`), dry-run mode, shell allowlists, a persistent agent action log (`mazu log`), resumable runs (`mazu run --resume`), a model capability table (`mazu models`), persistent settings (`mazu config`), guided onboarding (`mazu setup`, `mazu doctor --fix`), a terminal UI (`mazu ui`), and optional semantic memory search. This has been exercised through live testing against real Anthropic, OpenAI, and DeepSeek API keys (Gemini live-verified for authentication; full generation blocked on that key's zero free-tier quota — see known gaps), plus a test suite (525 tests, zero API cost by default) running on every push via GitHub Actions across Python 3.11–3.13 on Linux/Windows/macOS. A [VS Code/Cursor extension design document](docs/vscode-extension-design.md) exists for a possible future editor integration — design only, not implemented; [CHANGELOG.md](CHANGELOG.md) has the version-by-version history.
 
 **Known gaps, honestly listed:**
 - Semantic search's 50/50 BM25/embedding blend weight is a fixed constant, not tuned against real usage data.
-- Checkpoint/rollback is linear (like `git reset --hard`), not a branching tree yet.
+- `mazu rollback` itself is still linear (`git reset --hard` in place) — but `mazu run --from-checkpoint` now forks a new branch non-destructively and `mazu checkpoint compare-branches` diffs two runs' outcomes side by side, so "try a different approach from here without losing the original" no longer requires manual git surgery. There's still no tree/graph *view* of branch history (the terminal UI's checkpoint table is a flat, branch-annotated list, not a graph) and no merge/rebase concept between branches — this is diverge-and-compare, not reconcile.
 - Streaming is `mazu chat`-only for now; Gemini doesn't stream at all yet (falls back to a complete response, correct but not incremental — see `mazu models`). Deliberately deferred: the `google-genai` SDK's docs and source don't say whether function-call parts arrive fragmented, whole, or only in the final chunk during a stream, and guessing wrong risks silently mishandling tool calls. Needs a live Gemini key with real quota to verify before implementing.
 - Live testing so far has been on Windows; CI runs the test suite on Linux/macOS too, but a real provider hasn't been exercised live on those platforms yet.
 - Gemini is live-verified for authentication and error classification, but not yet for a full successful generation (the test key had zero free-tier quota).

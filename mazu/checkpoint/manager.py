@@ -33,12 +33,14 @@ def _backup_sqlite(src_path: Path, dst_path: Path) -> None:
 
 class CheckpointManager:
     """Each checkpoint = a git commit + a copy of memory.db + the skills directory +
-    the conversation at that point. Rollback is a destructive, linear `git reset
-    --hard` equivalent for all of these — no branching tree yet (see project roadmap
-    for that future work). `retention` bounds how many checkpoints' worth of
-    memory.db/skills/conversation.json copies are kept on disk at once — without
-    this, `.mazu/checkpoints/` grows forever. Git history itself is never pruned,
-    only our redundant snapshot copies.
+    the conversation at that point. Rollback (restore()) is still a destructive,
+    linear `git reset --hard` in place on whatever branch is current -- but
+    checkpoints can also be forked (fork()) onto a new git branch non-destructively,
+    with the checkpoint's memory/skills/conversation restored onto that branch too.
+    `retention` bounds how many checkpoints' worth of memory.db/skills/
+    conversation.json copies are kept on disk at once, per branch -- without this,
+    `.mazu/checkpoints/` grows forever. Git history itself is never pruned, only our
+    redundant snapshot copies.
     """
 
     def __init__(self, root: Path, retention: int = DEFAULT_RETENTION):
@@ -65,14 +67,45 @@ class CheckpointManager:
         result = _git(self.root, ["status", "--porcelain"])
         return bool(result.stdout.strip())
 
+    def _current_branch(self) -> str:
+        return _git(self.root, ["rev-parse", "--abbrev-ref", "HEAD"]).stdout.strip()
+
     def snapshot(
-        self, messages: list[dict], trigger: str, summary: str = "", session_id: str | None = None
+        self,
+        messages: list[dict],
+        trigger: str,
+        summary: str = "",
+        session_id: str | None = None,
+        parent_checkpoint_id: str | None = None,
     ) -> dict:
         self.ensure_git_repo()
         _git(self.root, ["add", "-A"])
         commit_msg = f"mazu checkpoint: {summary or trigger}"
         _git(self.root, ["commit", "-m", commit_msg, "--allow-empty"])
         commit_hash = _git(self.root, ["rev-parse", "HEAD"]).stdout.strip()
+        branch = self._current_branch()
+
+        # parent_checkpoint_id is normally left to auto-resolve. A session_id'd
+        # checkpoint (mazu run) points at that session's own last checkpoint -- the
+        # real logical predecessor, not just "whatever the previous list entry
+        # happens to be". This deliberately does NOT fall back further: a session_id
+        # that has never checkpointed under itself yet (a fresh run, or the first
+        # checkpoint of a fork) must stay a root unless fork() explicitly overrides
+        # it via the parent_checkpoint_id param -- falling back to "whatever else was
+        # last on this branch" here would wrongly link an unrelated run's history in.
+        #
+        # A checkpoint with NO session_id (manual `mazu checkpoint`, `mazu chat`) has
+        # no session chain to consult at all, so it falls back to "the current
+        # branch's own last checkpoint, from any session" -- this is what actually
+        # reproduces the pre-branching behavior (diff against whatever came right
+        # before it), since these calls are inherently sequential single-chain uses.
+        if parent_checkpoint_id is None:
+            if session_id is not None:
+                parent_entry = self.latest_for_session(session_id)
+            else:
+                parent_entry = self.index.last_for_branch(branch)
+            if parent_entry is not None:
+                parent_checkpoint_id = parent_entry["id"]
 
         entries = self.index.load()
         # Must be based on the highest id/step ever issued, not len(entries) -- once
@@ -106,6 +139,14 @@ class CheckpointManager:
             # resumed from its own last checkpoint via latest_for_session() below,
             # without needing a separate session-to-checkpoint mapping file.
             "session_id": session_id,
+            # Also optional/additive, same reasoning as session_id above. Sourced
+            # from git itself (not a separate naming scheme) so it can never drift
+            # from what `git branch`/`git log` actually show.
+            "branch": branch,
+            # None means "true root" -- either the very first checkpoint of the
+            # project, or the first checkpoint of a session forked onto a fresh
+            # branch via fork() with no history of its own yet.
+            "parent_checkpoint_id": parent_checkpoint_id,
         }
         self.index.append(entry)
         self.prune()
@@ -122,22 +163,43 @@ class CheckpointManager:
 
     def prune(self, keep_last: int | None = None) -> int:
         """Deletes on-disk snapshot data (memory.db/skills/conversation.json copies)
-        for all but the most recent `keep_last` checkpoints, and removes their index
-        entries to match (a pruned checkpoint is no longer a valid rollback target —
-        its git commit is still reachable via `git log`/`git checkout` manually, only
-        our redundant bookkeeping copy is gone). Returns how many were pruned.
+        for all but the most recent `keep_last` checkpoints *per branch*, and removes
+        their index entries to match (a pruned checkpoint is no longer a valid
+        rollback target — its git commit is still reachable via `git log`/`git
+        checkout` manually, only our redundant bookkeeping copy is gone). Returns how
+        many were pruned.
+
+        Grouped by branch (not one global suffix) so that a branch with few
+        checkpoints doesn't get wiped out just because a different, more active
+        branch produced many newer ones in the meantime — a global entries[-keep:]
+        would otherwise happily prune away the only checkpoint a divergent branch
+        has, purely because of chronological bad luck. Entries with no "branch" key
+        (pre-branching history) are grouped together under None, same convention as
+        CheckpointIndex.last_for_branch.
         """
         keep = keep_last if keep_last is not None else self.retention
         entries = self.index.load()
-        if len(entries) <= keep:
+
+        by_branch: dict[str | None, list[dict]] = {}
+        for entry in entries:
+            by_branch.setdefault(entry.get("branch"), []).append(entry)
+
+        to_prune: list[dict] = []
+        for branch_entries in by_branch.values():
+            if len(branch_entries) > keep:
+                to_prune.extend(branch_entries[:-keep] if keep > 0 else branch_entries)
+
+        if not to_prune:
             return 0
-        to_prune = entries[:-keep] if keep > 0 else entries
-        kept = entries[-keep:] if keep > 0 else []
+        # Recombine preserving original index order (not branch-grouped order) so
+        # index.json's ordering/append semantics are otherwise unaffected.
+        pruned_ids = {e["id"] for e in to_prune}
+        kept_in_order = [e for e in entries if e["id"] not in pruned_ids]
         for entry in to_prune:
             checkpoint_dir = self.checkpoints_dir / entry["id"]
             if checkpoint_dir.exists():
                 shutil.rmtree(checkpoint_dir, ignore_errors=True)
-        self.index.save(kept)
+        self.index.save(kept_in_order)
         return len(to_prune)
 
     def list_checkpoints(self) -> list[dict]:
@@ -145,10 +207,18 @@ class CheckpointManager:
 
     def _resolve_entry(self, checkpoint_id: str | None) -> dict:
         """Shared lookup for every method that takes an optional checkpoint id --
-        None means "the most recent one", matching how /rollback and `mazu
-        rollback` already behave with no argument.
+        None means "the most recent one on the current branch" (falling back to
+        "most recent overall" only if the current branch has no checkpoints of its
+        own yet, e.g. every pre-branching repo), matching how /rollback and `mazu
+        rollback` already behave with no argument. Without the branch scoping, a
+        no-argument `mazu rollback` on a feature branch could silently target a
+        checkpoint that was actually made on a different, divergent branch just
+        because it happened to be appended to the index later.
         """
-        entry = self.index.get(checkpoint_id) if checkpoint_id else self.index.last()
+        if checkpoint_id:
+            entry = self.index.get(checkpoint_id)
+        else:
+            entry = self.index.last_for_branch(self._current_branch()) or self.index.last()
         if entry is None:
             available = ", ".join(e["id"] for e in self.index.load()) or "(none)"
             raise ValueError(f"No checkpoint found for id={checkpoint_id!r}. Available: {available}")
@@ -268,6 +338,39 @@ class CheckpointManager:
             raise ValueError(result.stderr.strip() or f"Failed to create branch {branch_name!r}")
         return entry
 
+    def fork(self, checkpoint_id: str | None, branch_name: str) -> dict:
+        """The stateful counterpart to branch_from(): creates the branch pointer
+        (reusing branch_from() as-is), checks it out, and restores memory.db/skills
+        onto it -- the same restore logic restore() already uses, at the same
+        fidelity, so a forked branch's working state actually matches the
+        checkpoint it forked from, not just its git commit.
+
+        Deliberately never calls index.truncate_after() (unlike restore()): forking
+        is additive divergence, not a rollback. The origin branch's later
+        checkpoints must stay exactly as valid as they were before the fork --
+        truncating them here would silently destroy history restore() has no
+        business touching. This is the one property that makes fork() safe to use
+        as a "try something different" operation instead of a destructive one.
+        """
+        entry = self.branch_from(checkpoint_id, branch_name)
+        result = _git(self.root, ["checkout", branch_name])
+        if result.returncode != 0:
+            raise ValueError(result.stderr.strip() or f"Failed to check out branch {branch_name!r}")
+
+        checkpoint_dir = self.checkpoints_dir / entry["id"]
+        snapshot_db = checkpoint_dir / "memory.db"
+        if snapshot_db.exists():
+            _backup_sqlite(snapshot_db, self.memory_db_path)
+
+        if self.skills_dir.exists():
+            shutil.rmtree(self.skills_dir)
+        snapshot_skills = checkpoint_dir / "skills"
+        if snapshot_skills.exists():
+            shutil.copytree(snapshot_skills, self.skills_dir)
+
+        messages = self.inspect_conversation(entry["id"])
+        return {"entry": entry, "messages": messages}
+
     def show_entry(self, checkpoint_id: str | None = None) -> dict:
         """Full detail for one checkpoint: its index metadata plus how many messages
         its conversation snapshot holds and whether memory/skills were captured.
@@ -288,18 +391,30 @@ class CheckpointManager:
         }
 
     def timeline_entries(self) -> list[dict]:
-        """Every checkpoint's index metadata enriched with what changed since the
-        *previous* checkpoint (not since HEAD -- this is a step-by-step history
-        view, not a series of cumulative diffs) and whether a memory/skills
-        snapshot exists. The first checkpoint has no predecessor to diff against,
-        so its files_changed is empty rather than guessed at.
+        """Every checkpoint's index metadata enriched with what changed since its
+        *logical parent* (via parent_checkpoint_id -- its actual git ancestor, not
+        just whatever entry happens to sit before it in the flat index list, which
+        stops being the same thing the moment two branches' checkpoints interleave
+        chronologically in one list) and whether a memory/skills snapshot exists.
+        A root checkpoint (parent_checkpoint_id is None, or points at an entry that
+        has since been pruned out of the index) has no predecessor to diff against,
+        so its files_changed is empty rather than guessed at. For pre-branching
+        entries that never had parent_checkpoint_id recorded, this falls back to the
+        previous list entry -- identical to the old behavior, so output for today's
+        single-chain case is unchanged.
         """
         entries = self.index.load()
+        by_id = {e["id"]: e for e in entries}
         result = []
         prev_commit = None
         for entry in entries:
+            if "parent_checkpoint_id" in entry:
+                parent_entry = by_id.get(entry.get("parent_checkpoint_id"))
+                parent_commit = parent_entry["git_commit"] if parent_entry else None
+            else:
+                parent_commit = prev_commit
             files_changed = (
-                self._diff_names(prev_commit, entry["git_commit"]) if prev_commit is not None else []
+                self._diff_names(parent_commit, entry["git_commit"]) if parent_commit is not None else []
             )
             result.append(
                 {

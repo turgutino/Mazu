@@ -9,6 +9,40 @@ from mazu.llm.types import AgentResponse
 MAX_TOKENS = 4096
 
 
+def _with_cache_control(message: dict) -> dict:
+    """Returns a NEW message dict with a cache_control breakpoint on its last content
+    block -- never mutates the given message or any nested content-block dict, since
+    the caller's `messages` list is the same object reused verbatim elsewhere
+    (checkpoint snapshots, context compaction, the OpenAI-compatible message
+    converter). This is the standard Anthropic multi-turn caching pattern: moving the
+    breakpoint to the last message on every request means each new request's cache
+    read covers everything through the previous turn, and only the newest increment
+    is priced at full, uncached rate.
+
+    `content` here is one of two shapes seen in this codebase: a plain string (the
+    first user turn, `{"role": "user", "content": task}`), or a list of content-block
+    dicts (an assistant turn's `response.content`, or a tool-result round's
+    `tool_results` list). Both need converting into "a list of blocks whose last
+    element carries cache_control" -- a bare string can't carry the key itself.
+    """
+    content = message["content"]
+    if isinstance(content, str):
+        new_content = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
+    else:
+        new_content = [*content[:-1], {**content[-1], "cache_control": {"type": "ephemeral"}}]
+    return {**message, "content": new_content}
+
+
+def _with_tool_cache_control(tools: list[dict]) -> list[dict]:
+    """Returns a NEW tools list with a cache_control breakpoint on the last tool
+    definition -- caches the entire (large, static-per-run) tool schema block.
+    Never mutates the caller's `tools` list or its dicts.
+    """
+    if not tools:
+        return tools
+    return [*tools[:-1], {**tools[-1], "cache_control": {"type": "ephemeral"}}]
+
+
 class AnthropicProvider(Provider):
     def __init__(self):
         self._client = None
@@ -49,8 +83,8 @@ class AnthropicProvider(Provider):
                         "cache_control": {"type": "ephemeral"},
                     }
                 ],
-                messages=messages,
-                tools=tools,
+                messages=[*messages[:-1], _with_cache_control(messages[-1])] if messages else messages,
+                tools=_with_tool_cache_control(tools),
             )
         except anthropic.AnthropicError as e:
             raise classify_sdk_error(anthropic, e) from e
@@ -82,8 +116,8 @@ class AnthropicProvider(Provider):
                         "cache_control": {"type": "ephemeral"},
                     }
                 ],
-                messages=messages,
-                tools=tools,
+                messages=[*messages[:-1], _with_cache_control(messages[-1])] if messages else messages,
+                tools=_with_tool_cache_control(tools),
             ) as stream:
                 for text in stream.text_stream:
                     on_delta(text)
@@ -110,7 +144,13 @@ class AnthropicProvider(Provider):
             response = client.messages.create(
                 model=model,
                 max_tokens=1024,
-                system=system,
+                system=[
+                    {
+                        "type": "text",
+                        "text": system,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
                 messages=messages,
                 tools=[tool],
                 tool_choice={"type": "tool", "name": tool["name"]},

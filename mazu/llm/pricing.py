@@ -15,6 +15,10 @@ PRICING_PER_MILLION_TOKENS: dict[str, tuple[float, float]] = {
     "openai:gpt-5-mini": (0.5, 2.0),
     "deepseek:deepseek-chat": (0.27, 1.1),
     "deepseek:deepseek-reasoner": (0.55, 2.19),
+    # best-effort — verify against provider docs before relying on these for real budgeting
+    "openai:gpt-4o": (2.50, 10.0),
+    "openai:gpt-4o-mini": (0.15, 0.60),
+    "gemini:gemini-2.0-flash": (0.10, 0.40),
 }
 
 

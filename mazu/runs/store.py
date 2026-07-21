@@ -27,6 +27,13 @@ CREATE INDEX IF NOT EXISTS idx_runs_started ON runs(started_at);
 CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
 """
 
+# Additive lineage columns for forked runs (mazu run --from-checkpoint), added after
+# the original schema shipped. Nullable, default NULL for every pre-existing row and
+# every ordinary (non-forked) run. Not part of SCHEMA above because CREATE TABLE IF
+# NOT EXISTS never alters an existing table -- an already-created runs.db needs an
+# explicit ALTER TABLE migration instead (see __init__).
+LINEAGE_COLUMNS = ["origin_checkpoint_id", "parent_run_id", "branch_name"]
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -47,7 +54,14 @@ class RunStore:
         self.conn = sqlite3.connect(db_path)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
+        self._migrate_lineage_columns()
         self.conn.commit()
+
+    def _migrate_lineage_columns(self) -> None:
+        existing = {row["name"] for row in self.conn.execute("PRAGMA table_info(runs)")}
+        for column in LINEAGE_COLUMNS:
+            if column not in existing:
+                self.conn.execute(f"ALTER TABLE runs ADD COLUMN {column} TEXT")
 
     def start(
         self,
@@ -60,12 +74,15 @@ class RunStore:
         shell_allowlist: list[str] | None,
         max_cost: float | None,
         dry_run: bool,
+        origin_checkpoint_id: str | None = None,
+        parent_run_id: str | None = None,
+        branch_name: str | None = None,
     ) -> None:
         self.conn.execute(
             "INSERT INTO runs "
             "(id, task, model, max_steps, checkpoint_every, allow_shell, shell_allowlist, "
-            "max_cost, dry_run, status, started_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?)",
+            "max_cost, dry_run, status, started_at, origin_checkpoint_id, parent_run_id, branch_name) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?)",
             (
                 run_id,
                 task,
@@ -77,6 +94,9 @@ class RunStore:
                 max_cost,
                 int(dry_run),
                 _now(),
+                origin_checkpoint_id,
+                parent_run_id,
+                branch_name,
             ),
         )
         self.conn.commit()

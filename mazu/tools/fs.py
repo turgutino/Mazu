@@ -1,3 +1,5 @@
+import os
+import tempfile
 from pathlib import Path
 
 from mazu.tools.base import Tool, ToolResult
@@ -8,6 +10,32 @@ def _safe_path(root: Path, path: str) -> Path:
     if resolved != root and root not in resolved.parents:
         raise ValueError(f"path '{path}' escapes the project root")
     return resolved
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Writes `content` to `path` crash-safely: if the process (or the machine) dies
+    mid-write, the original file (if any) is left fully intact, and the new file is
+    never left half-written at the real path. A plain `Path.write_text` is a stream
+    of smaller writes with no such guarantee -- a crash partway through can leave a
+    truncated or corrupted file with no way to tell it apart from a real one.
+
+    Mechanism: write the full content to a temp file in the SAME directory as the
+    target (same filesystem is required for the final rename to be atomic), flush
+    and fsync it to disk, then `os.replace()` it onto the real path -- a single
+    filesystem-level rename that either fully happens or fully doesn't, on both
+    Windows and POSIX. There is no in-between state a crash can observe.
+    """
+    tmp_fd, tmp_path_str = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    tmp_path = Path(tmp_path_str)
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def make_fs_tools(root: Path, dry_run: bool = False) -> list[Tool]:
@@ -28,7 +56,7 @@ def make_fs_tools(root: Path, dry_run: bool = False) -> list[Tool]:
             if dry_run:
                 return ToolResult(f"[dry-run] Would write {len(input['content'])} bytes to {input['path']}")
             p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(input["content"], encoding="utf-8")
+            _atomic_write_text(p, input["content"])
             return ToolResult(f"Wrote {len(input['content'])} bytes to {input['path']}")
         except Exception as e:
             return ToolResult(str(e), is_error=True)
@@ -51,7 +79,7 @@ def make_fs_tools(root: Path, dry_run: bool = False) -> list[Tool]:
             # eventual real run) rather than an unconditional "sure, would work."
             if dry_run:
                 return ToolResult(f"[dry-run] Would edit {input['path']} (replacing 1 occurrence)")
-            p.write_text(text.replace(old, new), encoding="utf-8")
+            _atomic_write_text(p, text.replace(old, new))
             return ToolResult(f"Edited {input['path']}")
         except Exception as e:
             return ToolResult(str(e), is_error=True)

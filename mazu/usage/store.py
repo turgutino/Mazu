@@ -69,18 +69,27 @@ class UsageStore:
         )
         self.conn.commit()
 
-    def summary(self, since_days: int | None = None) -> dict:
+    def summary(self, since_days: int | None = None, session_id: str | None = None) -> dict:
         """Aggregates spend grouped by (provider, model). `estimated_cost_usd` can be
         NULL for calls against a model with no pricing entry -- those still count
         toward `total_calls` but contribute 0 to `total_cost`, and are flagged via
         `has_unpriced_calls` so callers can show an honest caveat instead of silently
         underreporting spend.
+
+        `session_id`, when given, scopes the summary to one run's own logged calls
+        (usage_log.session_id is already populated on every row `run_autonomous`
+        writes) -- this is what makes a per-run/per-branch estimated cost queryable
+        for `mazu checkpoint compare-branches` without a separate cost-tracking table.
         """
-        where = ""
+        conditions = []
         params: list = []
         if since_days is not None:
-            where = "WHERE created_at >= datetime('now', ?)"
+            conditions.append("created_at >= datetime('now', ?)")
             params.append(f"-{since_days} days")
+        if session_id is not None:
+            conditions.append("session_id = ?")
+            params.append(session_id)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
         rows = self.conn.execute(
             f"SELECT provider, model, COUNT(*) AS calls, "

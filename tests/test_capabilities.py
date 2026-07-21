@@ -15,7 +15,10 @@ def test_list_capabilities_includes_every_priced_model():
 
 
 def test_list_capabilities_includes_every_provider_default_even_if_unpriced():
-    # Gemini's default model has no pricing entry -- it must still appear.
+    # Every current provider default happens to have a pricing entry now, but the
+    # inclusion itself must not depend on that -- a provider default without pricing
+    # (the situation Gemini used to be in, before its entry was added) must still
+    # appear in the table, per list_capabilities()'s own docstring.
     rows = list_capabilities()
     keys = {f"{r.provider}:{r.model}" for r in rows}
     assert set(_PROVIDER_DEFAULT_MODELS.values()).issubset(keys)
@@ -40,10 +43,23 @@ def test_priced_model_has_a_real_price():
     assert row.output_price_per_million == 15.0
 
 
-def test_unpriced_model_reports_none_price_not_zero():
+def test_unpriced_model_reports_none_price_not_zero(monkeypatch):
+    # Every current provider default happens to be priced now (gpt-4o/gpt-4o-mini/
+    # gemini-2.0-flash were added to close that gap) -- simulate a provider whose
+    # default model genuinely has no pricing entry, the situation Gemini used to be
+    # in, to confirm list_capabilities() still reports None rather than silently
+    # defaulting to 0 (which would make an unpriced model look free instead of
+    # "can't estimate").
+    import mazu.llm.client as client_module
+
+    # list_capabilities() imports _PROVIDER_DEFAULT_MODELS from mazu.llm.client
+    # locally, inside the function body, so the patch target is the client module's
+    # own attribute, not a re-export on capabilities.py.
+    monkeypatch.setattr(
+        client_module, "_PROVIDER_DEFAULT_MODELS", {"fakeprovider": "fakeprovider:fake-model"}
+    )
     rows = {f"{r.provider}:{r.model}": r for r in list_capabilities()}
-    gemini_default = _PROVIDER_DEFAULT_MODELS["gemini"]
-    row = rows[gemini_default]
+    row = rows["fakeprovider:fake-model"]
     assert row.input_price_per_million is None
     assert row.output_price_per_million is None
 

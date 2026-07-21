@@ -76,6 +76,18 @@ This file is split into two parts on purpose:
 
 This exists because Phase L's design pass found a concrete blocker, not because JSON output is valuable in the abstract: today, anything wanting structured data out of Mazu has to either parse human-formatted terminal text (fragile — nothing currently protects that text from changing) or read the SQLite files directly (couples the caller to an internal schema with no stability promise). Not required before sharing Mazu as a CLI tool; required before anyone can build a serious editor integration on top of it.
 
+### Phase N — Branching checkpoints ✅ done
+- [x] `mazu run --from-checkpoint <id> --branch <name> "<task>"` — forks a new, divergent line of execution from any existing checkpoint (git branch + memory.db + skills restored onto it, new run/session id) and runs a task on it, without touching the origin branch's later history. Built on the existing `branch_from()`/`restore()` primitives, not a new mechanism.
+- [x] `mazu checkpoint compare-branches <run_id_a> <run_id_b>` — status/steps/stop-reason/memories-saved/estimated-cost side by side for two runs, plus a real diff between their final checkpointed states and their common ancestor checkpoint if one exists.
+- [x] Checkpoint index entries gained `branch` and `parent_checkpoint_id` (both additive; older entries simply lack them) so `timeline_entries()`, `prune()`, and no-argument `mazu rollback` are all branch-correct instead of assuming one linear chain — a real, demonstrable bug (wrong diffs, wrong prune targets, rollback targeting the wrong branch) that only shows up once branches coexist, fixed before it could happen in practice rather than after.
+
+### Phase O — Cost-efficiency hardening + crash-safe writes ✅ done
+- [x] Multi-breakpoint Anthropic prompt caching — tool schema list and last conversation message now get `cache_control` breakpoints alongside the system prompt (previously system-only), plus `run_forced_tool` (memory extraction/compaction) gained caching it was entirely missing. Live-verified: after step 1 of a real multi-step `mazu run`, each further step showed only ~2 fresh input tokens against 3,900+ read from cache.
+- [x] Pricing table gaps closed: `openai:gpt-4o`, `openai:gpt-4o-mini`, `gemini:gemini-2.0-flash` added, so `--max-cost`/`mazu usage`/`mazu models` are no longer silently blind to them.
+- [x] `mazu council --max-cost` — a thread-safe shared spend cap across parallel council members (council mode previously had zero cost guardrail, the one place the "minimum cost" goal was actively unmet). Always-on cost-awareness line shown regardless of whether the flag is used.
+- [x] Crash-safe (atomic) `write_file`/`edit_file` — write-to-temp-then-`os.replace` so a process/machine crash mid-write can never leave a corrupted file at the real path.
+- [x] A real bug found via live testing (not a hypothetical): council members that answered without ever using a tool skipped cost-tracking entirely, silently disabling `--max-cost` for the common no-tool-use case. Fixed and covered by a regression test.
+
 ## Directional (not committed — needs a second audience first)
 
 - **Team/shared-memory mode** (shared project memory export/import, approved-memory workflow) — premature for a single-user tool

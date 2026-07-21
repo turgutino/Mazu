@@ -36,6 +36,19 @@ class CheckpointIndex:
         entries = self.load()
         return entries[-1] if entries else None
 
+    def last_for_branch(self, branch: str) -> dict | None:
+        """Like last(), but scoped to one git branch -- once checkpoints from
+        multiple branches can coexist in this flat list, "most recently appended
+        overall" (last()) is no longer the same thing as "most recent on the branch
+        I'm currently on". Entries recorded before branch-awareness existed have no
+        "branch" key at all; they're treated as belonging to every branch (the
+        common case: they were all made on the one branch that existed back then,
+        so they're still valid rollback targets on whatever branch that turned out
+        to be).
+        """
+        matches = [e for e in self.load() if e.get("branch") in (branch, None)]
+        return matches[-1] if matches else None
+
     def truncate_after(self, checkpoint_id: str) -> None:
         """Drops index entries after `checkpoint_id` AND deletes their on-disk folders.
         Without this, a rolled-back checkpoint id (e.g. cp_0003) can get reused by a

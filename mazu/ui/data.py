@@ -19,6 +19,8 @@ class CheckpointRow:
     trigger: str
     summary: str
     files_changed: list[str]
+    branch: str
+    parent_checkpoint_id: str | None
 
 
 def load_checkpoints(checkpoint_manager: CheckpointManager) -> list[CheckpointRow]:
@@ -34,6 +36,10 @@ def load_checkpoints(checkpoint_manager: CheckpointManager) -> list[CheckpointRo
             trigger=e["trigger"],
             summary=e["summary"],
             files_changed=e["files_changed"],
+            # Both optional/additive on the underlying entry -- checkpoints recorded
+            # before branching existed simply lack these keys.
+            branch=e.get("branch") or "(unknown)",
+            parent_checkpoint_id=e.get("parent_checkpoint_id"),
         )
         for e in entries
     ]

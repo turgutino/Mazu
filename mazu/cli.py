@@ -368,7 +368,9 @@ def chat(model: str | None, shell_allowlist: str | None) -> None:
     default=None,
     type=float,
     help="Stop once the estimated spend (approximate, based on a built-in pricing table) "
-    "reaches this many USD. Ignored with a warning if the model has no pricing data.",
+    "reaches this many USD. Ignored with a warning if the model has no pricing data. "
+    "Checked after each step completes, so one step's cost can land after the limit is "
+    "reached before the run stops.",
 )
 @click.option(
     "--shell-allowlist",
@@ -396,6 +398,23 @@ def chat(model: str | None, shell_allowlist: str | None) -> None:
     "original task/model/options exactly -- other flags on this invocation are ignored. "
     "Mutually exclusive with passing a new TASK.",
 )
+@click.option(
+    "--from-checkpoint",
+    "from_checkpoint_id",
+    default=None,
+    help="Fork a new, divergent line of execution from an earlier checkpoint's state "
+    "(git commit + memory.db + skills), then run TASK on it -- unlike --resume, this is "
+    "NOT a continuation of the original run: it gets its own new run id on a new git "
+    "branch, and the original branch's later history is untouched. Requires --branch. "
+    "Mutually exclusive with --resume.",
+)
+@click.option(
+    "--branch",
+    "fork_branch_name",
+    default=None,
+    help="Name for the new git branch created by --from-checkpoint. Required together "
+    "with --from-checkpoint.",
+)
 @click.option("--model", default=None, help="Override the model.")
 def run(
     task: str | None,
@@ -407,6 +426,8 @@ def run(
     shell_allowlist: str | None,
     dry_run: bool,
     resume_run_id: str | None,
+    from_checkpoint_id: str | None,
+    fork_branch_name: str | None,
     model: str | None,
 ) -> None:
     """Run a task autonomously (multi-step, unattended), checkpointing along the way."""
@@ -416,8 +437,45 @@ def run(
     checkpoint_manager = CheckpointManager(root, **checkpoint_kwargs)
     run_store = RunStore(_runs_db_path(root))
 
+    if from_checkpoint_id is not None and resume_run_id is not None:
+        run_store.close()
+        raise click.UsageError("Pass either --from-checkpoint or --resume, not both.")
+    if fork_branch_name is not None and from_checkpoint_id is None:
+        run_store.close()
+        raise click.UsageError("--branch requires --from-checkpoint.")
+
     resume_messages = None
-    if resume_run_id is not None:
+    origin_checkpoint_id = None
+    parent_run_id = None
+    branch_name = None
+    if from_checkpoint_id is not None:
+        if not fork_branch_name:
+            run_store.close()
+            raise click.UsageError("--from-checkpoint requires --branch <new-branch-name>.")
+        if task is None:
+            run_store.close()
+            raise click.UsageError("--from-checkpoint requires a TASK to run on the new branch.")
+        try:
+            origin_entry = checkpoint_manager.show_entry(from_checkpoint_id)
+        except ValueError as e:
+            run_store.close()
+            click.echo(str(e))
+            return
+        try:
+            fork_result = checkpoint_manager.fork(origin_entry["id"], fork_branch_name)
+        except ValueError as e:
+            run_store.close()
+            click.echo(str(e))
+            return
+        origin_checkpoint_id = origin_entry["id"]
+        parent_run_id = origin_entry.get("session_id")
+        branch_name = fork_branch_name
+        resume_messages = fork_result["messages"]
+        click.echo(
+            f"Forked from {origin_checkpoint_id} onto new branch {branch_name!r} "
+            f"({len(resume_messages)} prior message(s)). Will run: {task}"
+        )
+    elif resume_run_id is not None:
         if task is not None:
             run_store.close()
             raise click.UsageError("Pass either a new TASK or --resume <run_id>, not both.")
@@ -486,6 +544,9 @@ def run(
         dry_run=dry_run,
         run_store=run_store,
         resume_messages=resume_messages,
+        origin_checkpoint_id=origin_checkpoint_id,
+        parent_run_id=parent_run_id,
+        branch_name=branch_name,
     )
 
 
@@ -547,7 +608,17 @@ DEFAULT_COUNCIL_LEAD = "anthropic:claude-opus-4-8"
     show_default=True,
     help="Model that reviews all answers and gives the final recommendation.",
 )
-def council(question: str, models: str, lead: str) -> None:
+@click.option(
+    "--max-cost",
+    default=None,
+    type=float,
+    help="Stop once the estimated spend (approximate, based on a built-in pricing table) "
+    "reaches this many USD across all council members combined. Ignored with a warning "
+    "if none of the models have pricing data. Checked after each round completes, so one "
+    "round's cost can land after the limit is reached before members stop; the lead "
+    "synthesis call is skipped entirely if the budget is already exhausted.",
+)
+def council(question: str, models: str, lead: str, max_cost: float | None) -> None:
     """Ask multiple models the same question (read-only, advisory) and have a lead model
     pick the best answer. Costs one API call per model plus one for the lead — an opt-in,
     higher-cost mode for decisions worth a second (and third) opinion, not the default flow.
@@ -578,6 +649,7 @@ def council(question: str, models: str, lead: str) -> None:
             usage_store=usage_store,
             session_id=session_id,
             action_log_store=action_log_store,
+            max_cost=max_cost,
         )
     finally:
         memory_store.close()
@@ -713,6 +785,94 @@ def checkpoint_compare(checkpoint_id_a: str, checkpoint_id_b: str) -> None:
         click.echo(str(e))
         return
     click.echo(f"Diff from {entry_a['id']} ({entry_a['created_at']}) to {entry_b['id']} ({entry_b['created_at']}):\n")
+    click.echo(diff if diff.strip() else "(no changes)")
+
+
+def _common_ancestor_id(
+    checkpoint_manager: CheckpointManager, checkpoint_id_a: str, checkpoint_id_b: str, max_hops: int = 20
+) -> str | None:
+    """Walks each checkpoint's parent_checkpoint_id chain looking for the first id
+    shared by both -- purely a readability aid for `compare-branches`, recomputed on
+    demand from data already in index.json rather than tracked as its own stored
+    field. Capped at max_hops so a corrupted/cyclic parent chain (should never
+    happen, but this is display code, not something that should be able to hang)
+    can't cause an unbounded walk.
+    """
+    by_id = {e["id"]: e for e in checkpoint_manager.list_checkpoints()}
+
+    def ancestors(start_id: str) -> list[str]:
+        chain = []
+        current_id = start_id
+        hops = 0
+        while current_id is not None and current_id in by_id and hops < max_hops:
+            chain.append(current_id)
+            current_id = by_id[current_id].get("parent_checkpoint_id")
+            hops += 1
+        return chain
+
+    chain_a = ancestors(checkpoint_id_a)
+    chain_b = set(ancestors(checkpoint_id_b))
+    return next((cid for cid in chain_a if cid in chain_b), None)
+
+
+@checkpoint.command("compare-branches")
+@click.argument("run_id_a")
+@click.argument("run_id_b")
+def checkpoint_compare_branches(run_id_a: str, run_id_b: str) -> None:
+    """Compare two runs' outcomes side by side -- status, steps, estimated cost,
+    checkpoints, memories saved -- plus a diff between their final checkpointed
+    states. Meant for comparing sibling branches forked from a shared ancestor
+    checkpoint (`mazu run --from-checkpoint`), but works for any two run ids."""
+    root = Path.cwd()
+    run_store = RunStore(_runs_db_path(root))
+    row_a = run_store.get(run_id_a)
+    row_b = run_store.get(run_id_b)
+    if row_a is None or row_b is None:
+        missing = run_id_a if row_a is None else run_id_b
+        run_store.close()
+        click.echo(f"No run found with id {missing}.")
+        return
+    run_store.close()
+
+    usage_store = UsageStore(_usage_db_path())
+    cost_a = usage_store.summary(session_id=run_id_a)["total_cost"]
+    cost_b = usage_store.summary(session_id=run_id_b)["total_cost"]
+    usage_store.close()
+
+    def _print_run(label: str, row, cost: float) -> None:
+        click.echo(f"{label}: {row['id']}")
+        click.echo(f"  Branch:            {row['branch_name'] or '(default)'}")
+        click.echo(f"  Status:            {row['status']}")
+        click.echo(f"  Stop reason:       {row['stop_reason'] or 'unknown'}")
+        click.echo(f"  Steps:             {row['last_step']}/{row['max_steps']}")
+        click.echo(f"  Checkpoints:       {row['checkpoints_created']}")
+        click.echo(f"  Memories saved:    {row['memories_saved']}")
+        click.echo(f"  Estimated cost:    ~${cost:.4f}")
+        click.echo(f"  Final checkpoint:  {row['last_checkpoint_id'] or '(none)'}")
+
+    _print_run("Run A", row_a, cost_a)
+    click.echo()
+    _print_run("Run B", row_b, cost_b)
+    click.echo()
+
+    if not row_a["last_checkpoint_id"] or not row_b["last_checkpoint_id"]:
+        click.echo("At least one run has no checkpoints -- nothing to diff.")
+        return
+
+    checkpoint_manager = CheckpointManager(root)
+    try:
+        entry_a, entry_b, diff = checkpoint_manager.compare(
+            row_a["last_checkpoint_id"], row_b["last_checkpoint_id"]
+        )
+    except ValueError as e:
+        click.echo(str(e))
+        return
+
+    ancestor_id = _common_ancestor_id(checkpoint_manager, entry_a["id"], entry_b["id"])
+    if ancestor_id is not None:
+        click.echo(f"Common ancestor: {ancestor_id}\n")
+
+    click.echo(f"Diff between final states ({entry_a['id']} vs {entry_b['id']}):\n")
     click.echo(diff if diff.strip() else "(no changes)")
 
 

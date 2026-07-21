@@ -71,6 +71,9 @@ def run_autonomous(
     dry_run: bool = False,
     run_store: RunStore | None = None,
     resume_messages: list[dict] | None = None,
+    origin_checkpoint_id: str | None = None,
+    parent_run_id: str | None = None,
+    branch_name: str | None = None,
 ) -> None:
     # The clean-baseline requirement exists so a real run's checkpoints are
     # meaningful diffs against a known-good starting point. A dry run never writes
@@ -84,7 +87,13 @@ def run_autonomous(
         )
         return
 
-    is_resume = resume_messages is not None
+    # A forked run (origin_checkpoint_id set) is seeded with an origin checkpoint's
+    # conversation just like a resume is, but it is NOT a resume: it gets a brand-new
+    # session_id (minted by the caller) rather than continuing an existing one, so
+    # start_session()/run_store.start() must run for it exactly like a fresh run --
+    # only a true resume (same session_id as before) needs to skip them.
+    is_fork = origin_checkpoint_id is not None
+    is_resume = resume_messages is not None and not is_fork
 
     # A resumed run reuses the SAME session_id (and therefore the same `sessions` row
     # MemoryStore already has for it) -- start_session()'s INSERT would violate that
@@ -111,9 +120,19 @@ def run_autonomous(
         run_store.start(
             session_id, task, resolved_model, max_steps, checkpoint_every, allow_shell,
             shell_allowlist, max_cost, dry_run,
+            origin_checkpoint_id=origin_checkpoint_id, parent_run_id=parent_run_id, branch_name=branch_name,
         )
 
-    messages: list[dict] = resume_messages if is_resume else [{"role": "user", "content": task}]
+    # A resume continues the exact same task/history as-is (resume_messages already
+    # ends with that task as its first message). A fork seeds from the origin
+    # checkpoint's history too, but then appends the new, divergent task the user
+    # actually asked for -- that's the whole point of forking rather than resuming.
+    if is_fork:
+        messages: list[dict] = [*resume_messages, {"role": "user", "content": task}]
+    elif is_resume:
+        messages = resume_messages
+    else:
+        messages = [{"role": "user", "content": task}]
     print_banner()
     print(f"model: {resolved_model}")
     print(
@@ -121,7 +140,8 @@ def run_autonomous(
         f"max-steps={max_steps} checkpoint-every={checkpoint_every} allow-shell={allow_shell}"
         f"{f' max-cost=${max_cost:.2f}' if max_cost is not None and cost_trackable else ''}"
         f"{' [DRY RUN — no files will be written, no commands will be run, no checkpoints will be created]' if dry_run else ''}"
-        f"{f' [RESUMED session {session_id}, {len(messages)} prior message(s)]' if is_resume else ''}\n"
+        f"{f' [RESUMED session {session_id}, {len(messages)} prior message(s)]' if is_resume else ''}"
+        f"{f' [FORKED from checkpoint {origin_checkpoint_id} onto branch {branch_name!r}]' if is_fork else ''}\n"
     )
 
     step = 0
@@ -131,6 +151,11 @@ def run_autonomous(
     total_cost = 0.0
     checkpoints_created = 0
     stop_reason: str | None = None
+    # Only the very first snapshot of a forked run needs an explicit
+    # parent_checkpoint_id override -- latest_for_session(session_id) can't find it
+    # itself yet, since this brand-new session_id has never checkpointed before.
+    # Every later snapshot in this run auto-resolves its parent via that same lookup.
+    first_checkpoint_of_run = True
     try:
         while step < max_steps:
             step += 1
@@ -217,8 +242,10 @@ def run_autonomous(
                 if not dry_run and step % checkpoint_every == 0:
                     summary = text_blocks[0][:100] if text_blocks else f"step {step}"
                     entry = checkpoint_manager.snapshot(
-                        messages, trigger="auto_after_tool_round", summary=summary, session_id=session_id
+                        messages, trigger="auto_after_tool_round", summary=summary, session_id=session_id,
+                        parent_checkpoint_id=(origin_checkpoint_id if first_checkpoint_of_run else None),
                     )
+                    first_checkpoint_of_run = False
                     print(f"[checkpoint {entry['id']} @ {entry['git_commit'][:8]}]")
                     checkpoints_created += 1
                     if run_store is not None:
