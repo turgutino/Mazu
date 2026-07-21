@@ -299,6 +299,41 @@ def test_timeline_shows_files_changed_between_checkpoints(tmp_path, monkeypatch)
     assert "new_file.py" in result.output
 
 
+def test_timeline_distinguishes_true_root_from_no_file_changes(tmp_path, monkeypatch):
+    """Regression test for a real bug found via live testing: a checkpoint with no
+    files_changed used to always print "(first checkpoint -- nothing to compare
+    against)", even when it had a real parent and the round simply didn't touch any
+    tracked file (e.g. a read-only/inspection-only tool round). These are different
+    facts and must not share the same message.
+    """
+    monkeypatch.chdir(tmp_path)
+    from mazu.checkpoint.manager import CheckpointManager
+
+    (tmp_path / ".gitignore").write_text(".mazu/\n", encoding="utf-8")
+    manager = CheckpointManager(tmp_path)
+    manager.snapshot(messages=[], trigger="auto_after_tool_round", summary="step1", session_id="s1")
+    (tmp_path / "a.py").write_text("1")
+    manager.snapshot(messages=[], trigger="auto_after_tool_round", summary="step2", session_id="s1")
+    # No file change this round -- real parent (the previous snapshot under the same
+    # session), but nothing new to diff.
+    manager.snapshot(
+        messages=[], trigger="auto_after_tool_round", summary="step3 no change", session_id="s1"
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["timeline"])
+    assert result.exit_code == 0, result.output
+
+    entries = result.output.split("\n\n")
+    step3_block = next(b for b in entries if "step3 no change" in b)
+    assert "no files changed since the previous checkpoint" in step3_block
+    assert "first checkpoint" not in step3_block
+
+    # The genuine root (step1) keeps the original message.
+    step1_block = next(b for b in entries if "step1" in b)
+    assert "first checkpoint — nothing to compare against" in step1_block
+
+
 def test_checkpoint_show_unknown_id_reports_cleanly(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     runner = CliRunner()

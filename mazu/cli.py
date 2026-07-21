@@ -943,13 +943,30 @@ def timeline(as_json: bool) -> None:
     if not entries:
         click.echo("No checkpoints yet.")
         return
-    for entry in entries:
+    for index, entry in enumerate(entries):
         click.echo(f"{entry['id']}  {entry['created_at']}  ({entry['trigger']}) {entry['summary']}")
         click.echo(f"    commit: {entry['git_commit'][:8]}")
         if entry["files_changed"]:
             click.echo(f"    files:  {', '.join(entry['files_changed'])}")
         else:
-            click.echo("    files:  (first checkpoint — nothing to compare against)")
+            # Empty files_changed is ambiguous on its own: it means either "this is
+            # a true root, nothing to diff against" OR "a real predecessor exists,
+            # but that round simply didn't touch any tracked file" (e.g. a
+            # read-only/inspection-only tool round) -- these are different facts and
+            # showing the same "first checkpoint" message for both is misleading.
+            # New entries carry parent_checkpoint_id explicitly (None = true root,
+            # even for a non-zero index, e.g. the first checkpoint of a forked
+            # branch). Older entries predating that field fall back to index 0,
+            # matching this command's original pre-branching behavior exactly.
+            has_parent = (
+                entry["parent_checkpoint_id"] is not None
+                if "parent_checkpoint_id" in entry
+                else index > 0
+            )
+            if has_parent:
+                click.echo("    files:  (no files changed since the previous checkpoint)")
+            else:
+                click.echo("    files:  (first checkpoint — nothing to compare against)")
         flags = []
         flags.append("memory" if entry["has_memory_snapshot"] else "no memory")
         flags.append("skills" if entry["has_skills_snapshot"] else "no skills")

@@ -2,6 +2,10 @@
 
 All notable changes to Mazu are documented here, newest first. Format loosely follows [Keep a Changelog](https://keepachangelog.com/); Mazu doesn't yet promise strict semver (see [ROADMAP.md](ROADMAP.md) for what "1.0" would mean) — treat version bumps as "a meaningful batch of work shipped," not a compatibility contract.
 
+## 0.16.1 — Fix misleading `mazu timeline` message
+
+- **Fixed:** a real bug found via live testing (a real `mazu run --allow-shell` session), not a hypothetical one — `mazu timeline` printed "(first checkpoint — nothing to compare against)" for *any* checkpoint with no changed files, even when it had a real parent and that round simply didn't touch any tracked file (e.g. a read-only/inspection-only tool round). Now distinguishes "true root, nothing to diff against" from "a real predecessor exists, but nothing changed this round" — confirmed live: an 8-checkpoint autonomous run showed steps 7 and 8 as false "first checkpoints" before this fix.
+
 ## 0.16.0 — Machine-readable output (`--json`)
 
 - **Added:** `--json` on the five read-oriented commands ROADMAP's Phase M names as what an integration would actually call: `mazu timeline`, `mazu memory list`, `mazu log`/`mazu log show`, `mazu runs`, `mazu models`. Every payload is wrapped in a versioned envelope (`{"schema_version": 1, "mazu_version": ..., "data": ...}`) via a new small `mazu/output.py` module, so a consumer can check compatibility instead of silently misparsing a future change.
