@@ -26,10 +26,14 @@ _PROVIDER_KEY_ENV_VARS = {
     "deepseek_api_key": "DEEPSEEK_API_KEY",
     "gemini_api_key": "GEMINI_API_KEY",
 }
-KNOWN_CONFIG_KEYS = {"default_model", "api_key", *_PROVIDER_KEY_ENV_VARS}
+KNOWN_CONFIG_KEYS = {"default_model", "api_key", "local_base_url", *_PROVIDER_KEY_ENV_VARS}
 # Keys whose stored value is a secret -- `mazu config list` masks these, never
-# printing the real value.
+# printing the real value. local_base_url is deliberately excluded: it's a URL, not
+# a secret, and showing it in plain text is what makes `mazu config list` useful for
+# confirming which local server Mazu is actually pointed at.
 _SECRET_CONFIG_KEYS = {"api_key", *_PROVIDER_KEY_ENV_VARS}
+
+_LOCAL_BASE_URL_DEFAULT = "http://localhost:1234/v1"  # LM Studio's default port
 
 
 def _read_raw_config() -> dict:
@@ -116,6 +120,21 @@ def _write_config(config: dict) -> None:
     path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
 
 
+def local_base_url() -> str:
+    """MAZU_LOCAL_BASE_URL env var, then the local_base_url config.toml key, then
+    LM Studio's default -- Ollama users set either the env var or `mazu config set
+    local_base_url http://localhost:11434/v1`. Its own function, not folded into
+    get_default_model(), since it answers a different question (a URL, not a model).
+    """
+    env_value = os.environ.get("MAZU_LOCAL_BASE_URL")
+    if env_value:
+        return env_value
+    configured = _read_raw_config().get("local_base_url")
+    if configured:
+        return configured
+    return _LOCAL_BASE_URL_DEFAULT
+
+
 def ensure_api_key(model: str | None = None) -> None:
     """Checks the API key for whichever provider `model` (or the auto-detected
     default) actually resolves to — not hardcoded to Anthropic. A DeepSeek-only or
@@ -128,6 +147,10 @@ def ensure_api_key(model: str | None = None) -> None:
 
     provider_name, _ = _split_model(model or default_model())
     provider = _PROVIDERS.get(provider_name)
+
+    if provider is not None and not provider.requires_api_key:
+        return
+
     env_var = provider.api_key_env if provider is not None else "ANTHROPIC_API_KEY"
 
     if not os.environ.get(env_var):

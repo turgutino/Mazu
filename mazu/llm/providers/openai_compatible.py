@@ -81,11 +81,18 @@ class OpenAICompatibleProvider(Provider):
     handling and message/tool conversion are shared.
     """
 
-    def __init__(self, base_url: str | None, api_key_env: str, provider_label: str):
+    def __init__(
+        self,
+        base_url: str | None,
+        api_key_env: str,
+        provider_label: str,
+        requires_api_key: bool = True,
+    ):
         self._client = None
         self.base_url = base_url
         self.api_key_env = api_key_env
         self.provider_label = provider_label
+        self.requires_api_key = requires_api_key
 
     def _get_client(self):
         if self._client is None:
@@ -100,22 +107,31 @@ class OpenAICompatibleProvider(Provider):
                     "The openai package isn't installed. Run `pip install mazu[openai]` "
                     f"(or `pip install openai`) to use {self.provider_label} models."
                 ) from e
-            api_key = os.environ.get(self.api_key_env)
-            if not api_key:
-                raise MazuAuthError(
-                    f"{self.api_key_env} is not set. Set it to use {self.provider_label} models."
-                )
-            if not api_key.isascii():
-                # A real API key is always plain ASCII. Non-ASCII here means the env var
-                # holds something else entirely (a pasted placeholder, a typo, leftover
-                # example text) -- left unchecked, this fails much later and much more
-                # confusingly, deep inside httpx's header encoding with a raw
-                # UnicodeEncodeError instead of a clear message about the actual problem.
-                raise MazuAuthError(
-                    f"{self.api_key_env} contains non-ASCII characters, so it can't be a "
-                    "real API key. It looks like it was set to a placeholder or example "
-                    f"value by mistake. Set {self.api_key_env} to your actual key and try again."
-                )
+            if self.requires_api_key:
+                api_key = os.environ.get(self.api_key_env)
+                if not api_key:
+                    raise MazuAuthError(
+                        f"{self.api_key_env} is not set. Set it to use {self.provider_label} models."
+                    )
+                if not api_key.isascii():
+                    # A real API key is always plain ASCII. Non-ASCII here means the env var
+                    # holds something else entirely (a pasted placeholder, a typo, leftover
+                    # example text) -- left unchecked, this fails much later and much more
+                    # confusingly, deep inside httpx's header encoding with a raw
+                    # UnicodeEncodeError instead of a clear message about the actual problem.
+                    raise MazuAuthError(
+                        f"{self.api_key_env} contains non-ASCII characters, so it can't be a "
+                        "real API key. It looks like it was set to a placeholder or example "
+                        f"value by mistake. Set {self.api_key_env} to your actual key and try again."
+                    )
+            else:
+                # A provider that opts out of requiring a key (e.g. a local model
+                # server with no real auth) still needs *some* string handed to the
+                # OpenAI SDK's client constructor -- it always sends an Authorization
+                # header. "not-needed" is never surfaced to the user; if they DO set
+                # the env var (e.g. a local proxy that actually checks a token),
+                # their real value is used instead.
+                api_key = os.environ.get(self.api_key_env) or "not-needed"
             self._client = OpenAI(api_key=api_key, base_url=self.base_url)
         return self._client
 

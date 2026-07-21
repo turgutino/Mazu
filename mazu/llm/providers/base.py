@@ -12,9 +12,15 @@ class Provider(ABC):
     `api_key_env` names the environment variable this provider reads its key from, so
     generic code (config.ensure_api_key, memory extraction's provider-matching) can
     check/report the right thing without hardcoding a specific provider.
+
+    `requires_api_key` defaults True for every existing (cloud) provider. A provider
+    that talks to a server with no real auth (e.g. a local model server) sets this
+    False so config.ensure_api_key() can skip demanding a key that doesn't exist for
+    a good reason, without special-casing that provider by name anywhere.
     """
 
     api_key_env: str
+    requires_api_key: bool = True
 
     @abstractmethod
     def run_turn(

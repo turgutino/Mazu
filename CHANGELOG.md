@@ -2,6 +2,15 @@
 
 All notable changes to Mazu are documented here, newest first. Format loosely follows [Keep a Changelog](https://keepachangelog.com/); Mazu doesn't yet promise strict semver (see [ROADMAP.md](ROADMAP.md) for what "1.0" would mean) — treat version bumps as "a meaningful batch of work shipped," not a compatibility contract.
 
+## 0.18.0 — Local model support (LM Studio, Ollama, any OpenAI-compatible server)
+
+- **Added:** a fifth provider, `local:<model-name>` — points Mazu at any OpenAI-compatible chat completions server running on your own machine (LM Studio, Ollama, llama.cpp's server), with no API key, no cloud egress, and no per-token cost. Reuses the same `openai` package as the `openai`/`deepseek` providers, so no new install extra is needed. Ollama-style multi-colon model tags work unchanged (`local:llama3.1:8b`).
+- **Added:** `mazu config set local_base_url <url>` (and the `MAZU_LOCAL_BASE_URL` env var, which wins over the config value) to point at something other than LM Studio's default `http://localhost:1234/v1` — e.g. Ollama's `http://localhost:11434/v1`.
+- **Added:** a new `requires_api_key` attribute on the `Provider` base class, so `config.ensure_api_key()` can skip its mandatory-key check for a provider that genuinely needs none, without hardcoding any provider name.
+- `local` is deliberately excluded from provider auto-detection — a reachable local server is never enough on its own to make Mazu silently switch to it; it must always be chosen explicitly via `--model`, `MAZU_MODEL`, or `mazu config set default_model`.
+- Live-verified end-to-end against a real running LM Studio instance (`qwen/qwen3.5-9b`): `mazu run --model local:qwen/qwen3.5-9b "..."` completed a full autonomous tool-use round-trip (file creation, checkpointing) with no auth errors.
+- Context window and pricing correctly show as unknown (`?`) in `mazu models` for local models — genuinely unknowable for an arbitrary user-loaded model, not fabricated as `$0`.
+
 ## 0.17.0 — Detect long-running server commands before they block `run_shell`
 
 - **Added:** `run_shell` now recognizes commands that start a long-running dev server/process that never exits on its own (`flask run`, `npm run dev`/`start`, `yarn dev`/`start`, bare `vite`, `next dev`, `uvicorn`/`gunicorn`, `python -m http.server`, `manage.py runserver`, `rails server`) and refuses to run them, returning an immediate, clear message instead of blocking for the full timeout. Found via a real live session: the model tried `python app.py` to "test" a Flask site it had just built, which blocked until the user manually interrupted the whole `mazu chat` process with Ctrl+C.

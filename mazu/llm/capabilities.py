@@ -37,6 +37,7 @@ REAL_STREAMING: dict[str, bool] = {
     "gemini": False,  # see GeminiProvider's docstring: chunk-level function-call
     # behavior isn't verifiable from static SDK inspection alone; deferred until it
     # can be checked against the live API.
+    "local": True,  # same OpenAICompatibleProvider code path as openai/deepseek
 }
 
 # All four current providers support tool/function calling -- Mazu's whole agent loop
@@ -48,6 +49,7 @@ TOOL_USE_SUPPORTED: dict[str, bool] = {
     "openai": True,
     "deepseek": True,
     "gemini": True,
+    "local": True,
 }
 
 

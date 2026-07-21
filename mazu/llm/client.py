@@ -4,6 +4,7 @@ from typing import Callable
 from mazu.llm.providers.anthropic_provider import AnthropicProvider
 from mazu.llm.providers.deepseek_provider import DeepSeekProvider
 from mazu.llm.providers.gemini_provider import GeminiProvider
+from mazu.llm.providers.local_provider import LocalProvider
 from mazu.llm.providers.openai_provider import OpenAIProvider
 from mazu.llm.retry import with_retry
 from mazu.llm.types import AgentResponse
@@ -13,11 +14,15 @@ _PROVIDERS = {
     "openai": OpenAIProvider(),
     "deepseek": DeepSeekProvider(),
     "gemini": GeminiProvider(),
+    "local": LocalProvider(),
 }
 
 # Tie-breaker order only — used when nothing is configured and we have to guess among
 # multiple keys that happen to be set. Not a requirement to have any specific one.
 # Gemini appended at the end so it never changes default resolution for existing setups.
+# "local" is deliberately absent -- it must always be chosen explicitly (--model
+# local:<name>, MAZU_MODEL, or `mazu config set default_model`), never auto-detected,
+# since a local server being reachable isn't a signal the user actually wants to use it.
 _PROVIDER_PRIORITY = ["anthropic", "openai", "deepseek", "gemini"]
 
 _PROVIDER_DEFAULT_MODELS = {
@@ -25,6 +30,7 @@ _PROVIDER_DEFAULT_MODELS = {
     "openai": "openai:gpt-5",
     "deepseek": "deepseek:deepseek-chat",
     "gemini": "gemini:gemini-2.0-flash",
+    "local": "local:your-model-name",
 }
 
 

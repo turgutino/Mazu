@@ -29,7 +29,7 @@ Mazu isn't trying to replace them, and it isn't an IDE. The goal is narrower and
 2. **A separate, global memory for *you*, not the project.** Personal facts — your name, preferred language, experience level, working style — live in `~/.mazu/global_memory.db` and follow you into every project, instead of being repeated (or lost) per-repo.
 3. **Checkpointable autonomy.** Every step of an autonomous run snapshots code (via git), the memory database, and the live conversation together. Roll back any one of them and you roll back all three, consistently — "undo" for an agent's actions, not just its files. `mazu timeline` / `checkpoint show` / `checkpoint diff` make that history inspectable, not just a black box you either trust or roll back blind.
 4. **A self-growing local skill library.** When the agent solves something reusable, it can save it as a plain Python function. Next time a similar task comes up, it can run the skill directly — skipping the model call entirely.
-5. **Provider-agnostic.** Anthropic, OpenAI, DeepSeek, and Gemini are all first-class, behind one thin adapter interface. Mazu auto-detects which one to use from whichever API key is actually set in your environment — no provider is required over another.
+5. **Provider-agnostic.** Anthropic, OpenAI, DeepSeek, and Gemini are all first-class, behind one thin adapter interface. Mazu auto-detects which one to use from whichever API key is actually set in your environment — no provider is required over another. A fifth option, `local:<model-name>`, points at any OpenAI-compatible server running on your own machine (LM Studio, Ollama, etc.) — no API key, no cloud, no per-token cost.
 6. **Council mode.** For a decision worth a second opinion, ask two or three different models the same question in parallel and have a lead model synthesize a final recommendation — opt-in, since it costs more than a single call.
 
 Everything above (agent loop, tool execution, memory database, skill library, checkpoints) runs locally. The only network traffic is your chosen model's API call, plus one cheap end-of-session call (on the same provider) to extract memories from the transcript. Nothing else leaves your machine, and there is no server run by this project.
@@ -361,7 +361,7 @@ mazu config list                                        # secrets are masked, sh
 mazu config unset default_model
 ```
 
-Stored in `~/.mazu/config.toml`, outside any repo. **Environment variables always win** — a config-file value is only used if the corresponding env var (`MAZU_MODEL`, `ANTHROPIC_API_KEY`, etc.) isn't already set, exactly like the resolution order above. Known keys: `default_model`, `anthropic_api_key`, `openai_api_key`, `deepseek_api_key`, `gemini_api_key` (plus a legacy `api_key`, kept as an alias for `anthropic_api_key` for anyone with a config file from before per-provider keys existed).
+Stored in `~/.mazu/config.toml`, outside any repo. **Environment variables always win** — a config-file value is only used if the corresponding env var (`MAZU_MODEL`, `ANTHROPIC_API_KEY`, etc.) isn't already set, exactly like the resolution order above. Known keys: `default_model`, `anthropic_api_key`, `openai_api_key`, `deepseek_api_key`, `gemini_api_key`, `local_base_url` (plus a legacy `api_key`, kept as an alias for `anthropic_api_key` for anyone with a config file from before per-provider keys existed).
 
 ### Model capabilities
 
@@ -370,6 +370,26 @@ mazu models
 ```
 
 Lists every model Mazu knows about with real (token-by-token) streaming support, tool-use support, approximate context window, and approximate pricing side by side — useful for picking a model without cross-referencing four different providers' docs. Best-effort and may go stale; see [`mazu/llm/capabilities.py`](mazu/llm/capabilities.py).
+
+### Local models (LM Studio, Ollama, and other OpenAI-compatible servers)
+
+No cloud account, no API key, and no per-token cost — point Mazu at a model running entirely on your own machine:
+
+```bash
+mazu chat --model local:qwen2.5-coder-7b-instruct   # exact name as shown in your local server
+```
+
+`local:<model-name>` reuses the same `openai` package as the `openai`/`deepseek` providers (no separate install extra needed) and works with anything that speaks the OpenAI-compatible chat completions API — LM Studio, Ollama, llama.cpp's server, etc. Ollama-style multi-colon tags work too (`local:llama3.1:8b`).
+
+By default Mazu talks to `http://localhost:1234/v1` (LM Studio's default port). Point it at Ollama (`http://localhost:11434/v1`) or anything else instead:
+
+```bash
+mazu config set local_base_url http://localhost:11434/v1
+# or, without persisting it:
+export MAZU_LOCAL_BASE_URL=http://localhost:11434/v1
+```
+
+`local` is never auto-selected — unlike the cloud providers, Mazu won't guess you want it just because a server happens to be reachable; you always choose it explicitly via `--model`, `MAZU_MODEL`, or `mazu config set default_model`. Context window and pricing show as unknown in `mazu models` (genuinely unknowable for an arbitrary user-loaded model) — cost is $0 in API terms, though your own machine's compute isn't free. Quality and speed depend entirely on what you have loaded; smaller local models are noticeably weaker than the frontier cloud models on complex multi-file tasks.
 
 ## Safety model
 

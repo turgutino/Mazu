@@ -83,7 +83,7 @@ def test_context_window_present_when_listed():
             assert rows[key].context_window == expected_window
 
 
-def test_all_four_providers_appear_in_capability_table():
+def test_all_five_providers_appear_in_capability_table():
     rows = list_capabilities()
     providers = {r.provider for r in rows}
-    assert providers == {"anthropic", "openai", "deepseek", "gemini"}
+    assert providers == {"anthropic", "openai", "deepseek", "gemini", "local"}
