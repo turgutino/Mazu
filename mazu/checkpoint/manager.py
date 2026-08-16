@@ -78,44 +78,56 @@ class CheckpointManager:
         session_id: str | None = None,
         parent_checkpoint_id: str | None = None,
     ) -> dict:
-        self.ensure_git_repo()
-        _git(self.root, ["add", "-A"])
-        commit_msg = f"mazu checkpoint: {summary or trigger}"
-        _git(self.root, ["commit", "-m", commit_msg, "--allow-empty"])
-        commit_hash = _git(self.root, ["rev-parse", "HEAD"]).stdout.strip()
-        branch = self._current_branch()
-
-        # parent_checkpoint_id is normally left to auto-resolve. A session_id'd
-        # checkpoint (mazu run) points at that session's own last checkpoint -- the
-        # real logical predecessor, not just "whatever the previous list entry
-        # happens to be". This deliberately does NOT fall back further: a session_id
-        # that has never checkpointed under itself yet (a fresh run, or the first
-        # checkpoint of a fork) must stay a root unless fork() explicitly overrides
-        # it via the parent_checkpoint_id param -- falling back to "whatever else was
-        # last on this branch" here would wrongly link an unrelated run's history in.
-        #
-        # A checkpoint with NO session_id (manual `mazu checkpoint`, `mazu chat`) has
-        # no session chain to consult at all, so it falls back to "the current
-        # branch's own last checkpoint, from any session" -- this is what actually
-        # reproduces the pre-branching behavior (diff against whatever came right
-        # before it), since these calls are inherently sequential single-chain uses.
-        if parent_checkpoint_id is None:
-            if session_id is not None:
-                parent_entry = self.latest_for_session(session_id)
-            else:
-                parent_entry = self.index.last_for_branch(branch)
-            if parent_entry is not None:
-                parent_checkpoint_id = parent_entry["id"]
-
-        # Held across id-assignment through the final index append (and the prune()
-        # call below, which re-enters this same lock safely -- see
-        # ReentrantFileLock) as ONE critical section. Protecting load()/append()
-        # individually would still leave a real race open: two concurrent `mazu`
-        # processes could each read the same "current entries" before either
-        # appends, both compute the same next_num, and produce two checkpoints
-        # that collide on disk/id. Holding the lock for the whole method is what
-        # actually closes that gap, not just the index.json file I/O in isolation.
+        # Held across the ENTIRE method -- git commands included, not just the
+        # id-assignment/file-bookkeeping part -- as ONE critical section. A real
+        # bug caught live (via a genuine two-process CI run on Linux, not just
+        # reasoning about it): with only the bookkeeping part locked, two
+        # concurrent `mazu` processes could each run `git add -A` / `git commit`
+        # unsynchronized. One process's `git commit` could land on HEAD in the
+        # narrow window between the OTHER process's own `git commit` and its
+        # `git rev-parse HEAD` read -- so that process's checkpoint entry would
+        # silently record the WRONG (someone else's) commit hash, corrupting the
+        # rollback target for that checkpoint id. Locking the git calls too makes
+        # each checkpoint's git-commit-then-read sequence fully atomic against
+        # concurrent checkpoints from other processes, not just our own index.json
+        # writes.
         with self.index.locked():
+            self.ensure_git_repo()
+            _git(self.root, ["add", "-A"])
+            commit_msg = f"mazu checkpoint: {summary or trigger}"
+            commit_result = _git(self.root, ["commit", "-m", commit_msg, "--allow-empty"])
+            if commit_result.returncode != 0:
+                raise RuntimeError(
+                    f"git commit failed while creating a checkpoint: "
+                    f"{commit_result.stderr.strip() or commit_result.stdout.strip()}"
+                )
+            commit_hash = _git(self.root, ["rev-parse", "HEAD"]).stdout.strip()
+            branch = self._current_branch()
+
+            # parent_checkpoint_id is normally left to auto-resolve. A session_id'd
+            # checkpoint (mazu run) points at that session's own last checkpoint --
+            # the real logical predecessor, not just "whatever the previous list
+            # entry happens to be". This deliberately does NOT fall back further: a
+            # session_id that has never checkpointed under itself yet (a fresh run,
+            # or the first checkpoint of a fork) must stay a root unless fork()
+            # explicitly overrides it via the parent_checkpoint_id param --
+            # falling back to "whatever else was last on this branch" here would
+            # wrongly link an unrelated run's history in.
+            #
+            # A checkpoint with NO session_id (manual `mazu checkpoint`, `mazu
+            # chat`) has no session chain to consult at all, so it falls back to
+            # "the current branch's own last checkpoint, from any session" -- this
+            # is what actually reproduces the pre-branching behavior (diff against
+            # whatever came right before it), since these calls are inherently
+            # sequential single-chain uses.
+            if parent_checkpoint_id is None:
+                if session_id is not None:
+                    parent_entry = self.latest_for_session(session_id)
+                else:
+                    parent_entry = self.index.last_for_branch(branch)
+                if parent_entry is not None:
+                    parent_checkpoint_id = parent_entry["id"]
+
             entries = self.index.load()
             # Must be based on the highest id/step ever issued, not len(entries) --
             # once pruning (below) removes old entries, len(entries) shrinks and
