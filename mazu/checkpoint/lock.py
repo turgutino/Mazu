@@ -1,4 +1,5 @@
-"""Cross-process, cross-platform advisory file lock for `.mazu/checkpoints/index.json`.
+"""Cross-process file lock for `.mazu/checkpoints/index.json`, backed by the
+`filelock` package.
 
 Two `mazu` processes touching the same project's checkpoints concurrently (e.g. two
 terminals running `mazu chat`/`mazu run` in the same directory) previously had no
@@ -7,118 +8,70 @@ process's save() could silently overwrite the first's, and -- worse -- both coul
 independently compute the same "next checkpoint id" from a stale read, producing two
 checkpoints that collide on disk.
 
-Uses the OS's own advisory file lock (fcntl.flock on POSIX, msvcrt.locking on
-Windows) rather than a lock-file-existence scheme (`open(path, 'x')` + delete): an
-OS-level lock is automatically released by the kernel when the holding process exits
-for ANY reason, including a crash or `kill -9` -- a lock-file-existence scheme would
-instead leave a stale lock file behind forever in that case, permanently wedging
-every future checkpoint operation until a human manually deletes it.
+Implementation note: this module went through two hand-rolled attempts first --
+OS-level byte-range locks (fcntl.flock/msvcrt.locking), then a directory-creation
+scheme with a PID-liveness staleness check. Both looked correct in code review and
+passed most runs, but a live multi-process CI run (and extensive local reproduction
+afterward, including direct acquire/release tracing) caught both silently failing to
+provide real mutual exclusion under contention on Windows -- two concurrent
+processes ended up computing the identical "next checkpoint id" despite each
+believing it held an exclusive lock. Rather than keep debugging a hand-rolled
+primitive in this exact problem space, this now uses `filelock`, the small,
+extremely widely-used library pip/virtualenv/tox rely on for the same purpose --
+proven correct rather than re-proven from scratch.
 """
 
-import os
-import sys
-import threading
-import time
-from contextlib import contextmanager
 from pathlib import Path
 
+from filelock import FileLock, Timeout
+
 DEFAULT_LOCK_TIMEOUT = 30.0
-_POLL_INTERVAL = 0.05
 
 
 class LockTimeoutError(TimeoutError):
     pass
 
 
-if sys.platform == "win32":
-    import msvcrt
-
-    def _try_acquire(fd: int) -> bool:
-        try:
-            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-            return True
-        except OSError:
-            return False
-
-    def _release(fd: int) -> None:
-        os.lseek(fd, 0, os.SEEK_SET)
-        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-
-else:
-    import fcntl
-
-    def _try_acquire(fd: int) -> bool:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return True
-        except OSError:
-            return False
-
-    def _release(fd: int) -> None:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-
-
-@contextmanager
-def _os_lock(lock_path: Path, timeout: float):
-    """Blocks (polling) until the OS-level lock on `lock_path` is acquired, or
-    raises LockTimeoutError after `timeout` seconds. msvcrt.locking requires the
-    file to have at least one byte to lock, hence the 'a+b' open + guaranteed byte.
-    """
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    f = open(lock_path, "a+b")
-    try:
-        if os.fstat(f.fileno()).st_size == 0:
-            f.write(b"0")
-            f.flush()
-        fd = f.fileno()
-        os.lseek(fd, 0, os.SEEK_SET)
-        deadline = time.monotonic() + timeout
-        while not _try_acquire(fd):
-            if time.monotonic() >= deadline:
-                raise LockTimeoutError(
-                    f"Timed out after {timeout}s waiting for the checkpoint index "
-                    f"lock at {lock_path}. Another mazu process may be stuck; if "
-                    "none is actually running, this file is safe to delete."
-                )
-            time.sleep(_POLL_INTERVAL)
-        try:
-            yield
-        finally:
-            _release(fd)
-    finally:
-        f.close()
-
-
 class ReentrantFileLock:
-    """A `with` context manager combining the cross-process OS lock above with
-    same-process, same-thread reentrancy tracking. Reentrancy matters because
-    CheckpointManager.snapshot() needs to hold the lock across id-assignment,
-    file writes, and its own call to prune() (which independently takes the same
-    lock when invoked standalone, e.g. `mazu checkpoint prune`) -- without
-    reentrancy, that nested acquisition would deadlock a process against itself,
-    since flock/msvcrt.locking are not reentrant across separate acquisitions
-    even from the same process.
+    """Thin wrapper around filelock.FileLock exposing the same `.acquire()` ->
+    context manager interface the rest of mazu/checkpoint/ already uses.
+    FileLock is itself reentrant within the same thread (an internal counter, not
+    a second OS-level acquisition), which is exactly what CheckpointManager.
+    snapshot() needs: it holds the lock across git commands, id-assignment, file
+    writes, and its own call to prune() (which independently takes the same lock
+    when invoked standalone, e.g. `mazu checkpoint prune`) -- without reentrancy,
+    that nested acquisition would deadlock a process against itself.
     """
 
     def __init__(self, lock_path: Path, timeout: float = DEFAULT_LOCK_TIMEOUT):
-        self.lock_path = lock_path
-        self.timeout = timeout
-        self._local = threading.local()
+        # filelock manages its own lock file at this exact path (it does not need
+        # to be pre-created, and unlike our old schemes, there's no separate
+        # pid-file/directory bookkeeping for us to get wrong).
+        self._lock = FileLock(str(lock_path) + ".filelock", timeout=timeout)
 
-    @contextmanager
     def acquire(self):
-        depth = getattr(self._local, "depth", 0)
-        if depth > 0:
-            self._local.depth = depth + 1
-            try:
-                yield
-            finally:
-                self._local.depth = depth
-            return
+        return _AcquireContext(self._lock)
 
-        self._local.depth = 1
+
+class _AcquireContext:
+    """Translates filelock's Timeout exception into our own LockTimeoutError, so
+    callers (and tests) depend on a mazu-owned exception type, not filelock's.
+    """
+
+    def __init__(self, lock: FileLock):
+        self._lock = lock
+
+    def __enter__(self):
         try:
-            with _os_lock(self.lock_path, self.timeout):
-                yield
-        finally:
-            self._local.depth = 0
+            self._lock.acquire()
+        except Timeout as e:
+            raise LockTimeoutError(
+                f"Timed out waiting for the checkpoint index lock at "
+                f"{self._lock.lock_file}. Another mazu process may be stuck; if "
+                "none is actually running, this file is safe to delete."
+            ) from e
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self._lock.release()
+        return False

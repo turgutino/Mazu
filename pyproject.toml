@@ -39,6 +39,7 @@ classifiers = [
 dependencies = [
     "anthropic>=0.40.0",
     "click>=8.1",
+    "filelock>=3.13",
 ]
 
 [project.optional-dependencies]

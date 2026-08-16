@@ -26,8 +26,21 @@ class CheckpointIndex:
         self.checkpoints_dir.mkdir(parents=True, exist_ok=True)
         self.index_path = checkpoints_dir / "index.json"
         self._lock = ReentrantFileLock(checkpoints_dir / ".index.lock")
-        if not self.index_path.exists():
-            self.save([])
+        # Real bug caught live (via a flaky multi-process CI/local repro, not just
+        # reasoning about it): the existence check here used to happen OUTSIDE the
+        # lock ("if not self.index_path.exists(): self.save([])"). When two
+        # processes construct a CheckpointIndex for the same fresh project at
+        # nearly the same time, both can see the file doesn't exist yet -- but if
+        # one process's save([]) call gets delayed by lock contention long enough
+        # that the OTHER process has, in the meantime, fully run several real
+        # snapshot() calls, the delayed save([]) still unconditionally writes an
+        # EMPTY list once it finally gets the lock, silently wiping out everything
+        # the other process already wrote. Re-checking existence AFTER acquiring
+        # the lock (not before) closes that window: `locked()` is reentrant, so
+        # this nests safely into save()'s own internal locking.
+        with self.locked():
+            if not self.index_path.exists():
+                self.save([])
 
     def locked(self):
         """Context manager: `with self.index.locked(): ...`. Reentrant within the
