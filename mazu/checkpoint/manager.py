@@ -107,50 +107,80 @@ class CheckpointManager:
             if parent_entry is not None:
                 parent_checkpoint_id = parent_entry["id"]
 
-        entries = self.index.load()
-        # Must be based on the highest id/step ever issued, not len(entries) -- once
-        # pruning (below) removes old entries, len(entries) shrinks and would start
-        # reissuing ids that collide with still-kept checkpoints, corrupting them.
-        next_num = max((e["step"] for e in entries), default=0) + 1
-        checkpoint_id = f"cp_{next_num:06d}"
-        checkpoint_dir = self.checkpoints_dir / checkpoint_id
-        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        # Held across id-assignment through the final index append (and the prune()
+        # call below, which re-enters this same lock safely -- see
+        # ReentrantFileLock) as ONE critical section. Protecting load()/append()
+        # individually would still leave a real race open: two concurrent `mazu`
+        # processes could each read the same "current entries" before either
+        # appends, both compute the same next_num, and produce two checkpoints
+        # that collide on disk/id. Holding the lock for the whole method is what
+        # actually closes that gap, not just the index.json file I/O in isolation.
+        with self.index.locked():
+            entries = self.index.load()
+            # Must be based on the highest id/step ever issued, not len(entries) --
+            # once pruning (below) removes old entries, len(entries) shrinks and
+            # would start reissuing ids that collide with still-kept checkpoints,
+            # corrupting them.
+            next_num = max((e["step"] for e in entries), default=0) + 1
+            checkpoint_id = f"cp_{next_num:06d}"
+            checkpoint_dir = self.checkpoints_dir / checkpoint_id
 
-        (checkpoint_dir / "conversation.json").write_text(
-            json.dumps(messages, indent=2), encoding="utf-8"
-        )
-        if self.memory_db_path.exists():
-            _backup_sqlite(self.memory_db_path, checkpoint_dir / "memory.db")
-        if self.skills_dir.exists():
-            skills_snapshot_dir = checkpoint_dir / "skills"
-            if skills_snapshot_dir.exists():  # defensive: guard against a stale/reused id
-                shutil.rmtree(skills_snapshot_dir)
-            shutil.copytree(self.skills_dir, skills_snapshot_dir)
+            # If anything below fails partway through (disk full, permissions,
+            # Ctrl+C) before the index entry is ever appended, the partially
+            # written checkpoint_dir would otherwise be left orphaned on disk --
+            # harmless (nothing references it) but confusing clutter. Clean it up
+            # and re-raise rather than silently swallowing the error: the caller
+            # still needs to know this checkpoint didn't actually happen. Note
+            # this can only ever run cleanup code that Python itself gets a chance
+            # to execute -- a true OS-level crash or `kill -9` here would still
+            # leave the git commit made above (line ~84) untracked by Mazu's own
+            # index, recoverable manually via `git log` but invisible to `mazu
+            # timeline`/`rollback`. That residual gap is inherent to checkpointing
+            # being git commit (atomic on its own) + separate file bookkeeping
+            # (not a single transaction spanning both) and isn't something
+            # userspace cleanup code can close -- documented here rather than
+            # silently assumed away.
+            try:
+                checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-        entry = {
-            "id": checkpoint_id,
-            "step": next_num,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "git_commit": commit_hash,
-            "trigger": trigger,
-            "summary": summary or trigger,
-            # Optional and additive -- older index entries simply lack this key
-            # (.get("session_id") returns None for them). Lets a `mazu run` be
-            # resumed from its own last checkpoint via latest_for_session() below,
-            # without needing a separate session-to-checkpoint mapping file.
-            "session_id": session_id,
-            # Also optional/additive, same reasoning as session_id above. Sourced
-            # from git itself (not a separate naming scheme) so it can never drift
-            # from what `git branch`/`git log` actually show.
-            "branch": branch,
-            # None means "true root" -- either the very first checkpoint of the
-            # project, or the first checkpoint of a session forked onto a fresh
-            # branch via fork() with no history of its own yet.
-            "parent_checkpoint_id": parent_checkpoint_id,
-        }
-        self.index.append(entry)
-        self.prune()
-        return entry
+                (checkpoint_dir / "conversation.json").write_text(
+                    json.dumps(messages, indent=2), encoding="utf-8"
+                )
+                if self.memory_db_path.exists():
+                    _backup_sqlite(self.memory_db_path, checkpoint_dir / "memory.db")
+                if self.skills_dir.exists():
+                    skills_snapshot_dir = checkpoint_dir / "skills"
+                    if skills_snapshot_dir.exists():  # defensive: stale/reused id
+                        shutil.rmtree(skills_snapshot_dir)
+                    shutil.copytree(self.skills_dir, skills_snapshot_dir)
+            except BaseException:
+                shutil.rmtree(checkpoint_dir, ignore_errors=True)
+                raise
+
+            entry = {
+                "id": checkpoint_id,
+                "step": next_num,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "git_commit": commit_hash,
+                "trigger": trigger,
+                "summary": summary or trigger,
+                # Optional and additive -- older index entries simply lack this key
+                # (.get("session_id") returns None for them). Lets a `mazu run` be
+                # resumed from its own last checkpoint via latest_for_session()
+                # below, without needing a separate session-to-checkpoint mapping.
+                "session_id": session_id,
+                # Also optional/additive, same reasoning as session_id above.
+                # Sourced from git itself (not a separate naming scheme) so it can
+                # never drift from what `git branch`/`git log` actually show.
+                "branch": branch,
+                # None means "true root" -- either the very first checkpoint of
+                # the project, or the first checkpoint of a session forked onto a
+                # fresh branch via fork() with no history of its own yet.
+                "parent_checkpoint_id": parent_checkpoint_id,
+            }
+            self.index.append(entry)
+            self.prune()
+            return entry
 
     def latest_for_session(self, session_id: str) -> dict | None:
         """The most recent checkpoint recorded under a given session/run id, or None
@@ -178,29 +208,36 @@ class CheckpointManager:
         CheckpointIndex.last_for_branch.
         """
         keep = keep_last if keep_last is not None else self.retention
-        entries = self.index.load()
+        # Reentrant with snapshot()'s own lock (see ReentrantFileLock) -- prune()
+        # is called both standalone (`mazu checkpoint prune`) and from inside
+        # snapshot() while it's already holding this same lock; either way, the
+        # load()-then-save() below must be one atomic unit against a concurrent
+        # process, not two separately-locked calls that a second process could
+        # interleave between.
+        with self.index.locked():
+            entries = self.index.load()
 
-        by_branch: dict[str | None, list[dict]] = {}
-        for entry in entries:
-            by_branch.setdefault(entry.get("branch"), []).append(entry)
+            by_branch: dict[str | None, list[dict]] = {}
+            for entry in entries:
+                by_branch.setdefault(entry.get("branch"), []).append(entry)
 
-        to_prune: list[dict] = []
-        for branch_entries in by_branch.values():
-            if len(branch_entries) > keep:
-                to_prune.extend(branch_entries[:-keep] if keep > 0 else branch_entries)
+            to_prune: list[dict] = []
+            for branch_entries in by_branch.values():
+                if len(branch_entries) > keep:
+                    to_prune.extend(branch_entries[:-keep] if keep > 0 else branch_entries)
 
-        if not to_prune:
-            return 0
-        # Recombine preserving original index order (not branch-grouped order) so
-        # index.json's ordering/append semantics are otherwise unaffected.
-        pruned_ids = {e["id"] for e in to_prune}
-        kept_in_order = [e for e in entries if e["id"] not in pruned_ids]
-        for entry in to_prune:
-            checkpoint_dir = self.checkpoints_dir / entry["id"]
-            if checkpoint_dir.exists():
-                shutil.rmtree(checkpoint_dir, ignore_errors=True)
-        self.index.save(kept_in_order)
-        return len(to_prune)
+            if not to_prune:
+                return 0
+            # Recombine preserving original index order (not branch-grouped
+            # order) so index.json's ordering/append semantics are unaffected.
+            pruned_ids = {e["id"] for e in to_prune}
+            kept_in_order = [e for e in entries if e["id"] not in pruned_ids]
+            for entry in to_prune:
+                checkpoint_dir = self.checkpoints_dir / entry["id"]
+                if checkpoint_dir.exists():
+                    shutil.rmtree(checkpoint_dir, ignore_errors=True)
+            self.index.save(kept_in_order)
+            return len(to_prune)
 
     def list_checkpoints(self) -> list[dict]:
         return self.index.load()
