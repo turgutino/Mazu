@@ -1,6 +1,7 @@
 from mazu.action_log.store import ActionLogStore, record_action
 from mazu.agent.compaction import compact_if_needed, force_compact
 from mazu.agent.context import build_system_prompt
+from mazu.agent.council import _SharedCostTracker
 from mazu.agent.interaction import safe_confirm
 from mazu.agent.session import finalize_session
 from mazu.banner import print_banner
@@ -74,6 +75,7 @@ def run_autonomous(
     origin_checkpoint_id: str | None = None,
     parent_run_id: str | None = None,
     branch_name: str | None = None,
+    shared_cost_tracker: "_SharedCostTracker | None" = None,
 ) -> None:
     # The clean-baseline requirement exists so a real run's checkpoints are
     # meaningful diffs against a known-good starting point. A dry run never writes
@@ -202,6 +204,14 @@ def run_autonomous(
                 if step_cost is not None:
                     total_cost += step_cost
                     cost_suffix = f" | ~${total_cost:.4f} so far"
+                # Fed into the shared tracker (mazu explore's cross-branch budget) in
+                # addition to, never instead of, this run's own local total_cost/
+                # max_cost gate below -- a branch with no local --max-cost set can
+                # still be cut short by a SIBLING branch's spend exhausting the
+                # shared pool, same as council.py's _ask_member already does.
+                shared_exhausted = (
+                    shared_cost_tracker.add_and_check(step_cost) if shared_cost_tracker is not None else False
+                )
                 if usage_store is not None:
                     usage_store.log(
                         "run", session_id, provider_name, model_name, step_in, step_out, step_cost
@@ -226,6 +236,14 @@ def run_autonomous(
                         f"--max-cost limit (${max_cost:.2f})."
                     )
                     stop_reason = "max_cost"
+                    break
+
+                if shared_exhausted:
+                    print(
+                        f"\nStopping: the shared --max-cost budget across all explore "
+                        f"branches was reached (this branch's own share: ~${total_cost:.4f})."
+                    )
+                    stop_reason = "shared_max_cost"
                     break
 
                 tool_results, round_failed = _execute_round(

@@ -9,7 +9,9 @@ from mazu import __version__
 from mazu.action_log.store import ActionLogStore
 from mazu.agent.autonomous import run_autonomous
 from mazu.agent.council import run_council
+from mazu.agent.explore import DEFAULT_MAX_EXPLORE_STEPS, MAX_EXPLORE_APPROACHES, format_explore_report, run_explore
 from mazu.agent.loop import run_chat_loop
+from mazu.agent.registry_factory import build_registry as _build_registry
 from mazu.banner import print_banner
 from mazu.checkpoint.manager import CheckpointManager
 from mazu.config import (
@@ -74,25 +76,6 @@ def _usage_db_path() -> Path:
     # Global like global_memory.db — spend is tied to the person/API keys, not any
     # one project. A separate file on purpose (see UsageStore's docstring).
     return Path.home() / ".mazu" / "usage.db"
-
-
-def _build_registry(
-    root: Path,
-    memory_store: MemoryStore,
-    global_memory_store: MemoryStore,
-    skill_manager: SkillManager,
-    session_id: str,
-    dry_run: bool = False,
-) -> ToolRegistry:
-    registry = ToolRegistry()
-    for tool in make_fs_tools(root, dry_run=dry_run):
-        registry.register(tool)
-    registry.register(make_shell_tool(root, dry_run=dry_run))
-    for tool in make_memory_tools(memory_store, global_memory_store, session_id):
-        registry.register(tool)
-    for tool in make_skill_tools(skill_manager):
-        registry.register(tool)
-    return registry
 
 
 def _parse_shell_allowlist(raw: str | None) -> list[str] | None:
@@ -683,6 +666,127 @@ def council(question: str, models: str, lead: str, max_cost: float | None) -> No
         global_memory_store.close()
         usage_store.close()
         action_log_store.close()
+
+
+@main.command()
+@click.argument("task")
+@click.option(
+    "--approaches",
+    default=2,
+    show_default=True,
+    type=int,
+    help=f"How many models to run in parallel (max {MAX_EXPLORE_APPROACHES}).",
+)
+@click.option(
+    "--models",
+    default=None,
+    help="Comma-separated provider:model list, one per approach -- required whenever "
+    "--approaches is more than 1 (silently repeating the same default model would "
+    "burn money with no comparative signal, so this refuses rather than guesses).",
+)
+@click.option(
+    "--from-checkpoint",
+    "from_checkpoint_id",
+    default=None,
+    help="Fork all branches from this checkpoint instead of the current branch's most "
+    "recent one.",
+)
+@click.option(
+    "--test-command",
+    default=None,
+    help="Shell command run inside each branch's own worktree after its agent finishes "
+    "(e.g. 'pytest -q') -- pass/fail becomes the primary ranking signal. Without this, "
+    "branches are only ranked by estimated cost; no test-based winner is ever guessed.",
+)
+@click.option(
+    "--max-cost",
+    default=None,
+    type=float,
+    help="Stop once the estimated spend (approximate, based on a built-in pricing table) "
+    "reaches this many USD, shared across ALL branches combined -- one expensive branch "
+    "can cut its siblings short. Optional, but a loud warning is printed if omitted, "
+    "since this runs N full autonomous agents in parallel with --allow-shell forced on.",
+)
+@click.option(
+    "--max-steps", default=DEFAULT_MAX_EXPLORE_STEPS, show_default=True, help="Per-branch step limit."
+)
+def explore(
+    task: str,
+    approaches: int,
+    models: str | None,
+    from_checkpoint_id: str | None,
+    test_command: str | None,
+    max_cost: float | None,
+    max_steps: int,
+) -> None:
+    """Fork N branches from one checkpoint, run TASK on each with a different model
+    in parallel (real git worktrees, not sequential checkouts), optionally evaluate
+    each with --test-command, and print a ranked comparison. Opt-in only -- never
+    triggered by `mazu run`/`mazu chat`. Nothing is auto-merged or auto-adopted;
+    every branch's adoption command is printed for you to run yourself.
+    """
+    if approaches > MAX_EXPLORE_APPROACHES:
+        raise click.UsageError(
+            f"--approaches {approaches} exceeds the maximum of {MAX_EXPLORE_APPROACHES} "
+            "(a hard cap so a typo can't turn into an accidental large bill)."
+        )
+    if approaches > 1 and not models:
+        raise click.UsageError(
+            "--models is required whenever --approaches is more than 1 -- pass one "
+            "provider:model per approach, e.g. --models "
+            "anthropic:claude-sonnet-5,deepseek:deepseek-chat."
+        )
+    model_list = [m.strip() for m in models.split(",") if m.strip()] if models else [None]
+    if len(model_list) != approaches:
+        raise click.UsageError(
+            f"--models lists {len(model_list)} model(s) but --approaches is {approaches} -- "
+            "these must match exactly, one model per branch."
+        )
+
+    root = Path.cwd()
+    ensure_gitignore(root)
+    checkpoint_manager = CheckpointManager(root)
+
+    for model in model_list:
+        ensure_api_key(model)
+
+    print_banner()
+    click.echo(
+        f"[cost] Explore mode runs {approaches} full autonomous agents in parallel — "
+        f"expect roughly {approaches}x the cost of a single `mazu run`, plus each branch "
+        "may make multiple tool-call rounds."
+    )
+    click.echo(
+        "[safety] --allow-shell is forced on for every branch (parallel/unattended "
+        "branches cannot use the interactive confirmation prompt); the hardcoded shell "
+        "denylist still applies."
+    )
+    if max_cost is None:
+        click.echo(
+            "[cost] warning: no --max-cost set — this runs with no shared spending cap."
+        )
+    else:
+        click.echo(f"[cost] Shared budget across all {approaches} branches: ${max_cost:.2f}.")
+
+    try:
+        results = run_explore(
+            task,
+            models=model_list,
+            root=root,
+            checkpoint_manager=checkpoint_manager,
+            from_checkpoint_id=from_checkpoint_id,
+            max_cost=max_cost,
+            test_command=test_command,
+            max_steps=max_steps,
+        )
+    except ValueError as e:
+        click.echo(str(e))
+        return
+    except RuntimeError as e:
+        click.echo(f"[error] {e}")
+        return
+
+    click.echo("\n" + format_explore_report(results, test_command))
 
 
 @main.group(invoke_without_command=True)
