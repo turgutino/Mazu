@@ -4,7 +4,7 @@
 
 **Mazu is a local memory and checkpoint layer for coding agents.**
 
-Alpha, but usable — the core loop (memory, checkpoints, rollback) has been exercised through live testing against real Anthropic/OpenAI/DeepSeek API keys and a 450+ test suite (see [Status & roadmap](#status--roadmap) for the honest gaps list, not just the wins).
+Alpha, but usable — the core loop (memory, checkpoints, rollback) has been exercised through live testing against real Anthropic/OpenAI/DeepSeek API keys and a 650+ test suite (see [Status & roadmap](#status--roadmap) for the honest gaps list, not just the wins).
 
 ```
   ███╗   ███╗
@@ -285,6 +285,15 @@ An interactive, full-screen alternative to `mazu timeline`/`mazu memory list`/`m
 
 <img src="docs/images/mazu-ui-checkpoints.svg" alt="mazu ui — Checkpoints tab" width="600"> <img src="docs/images/mazu-ui-memory.svg" alt="mazu ui — Memory tab" width="600">
 
+### Web UI (separate package)
+
+Prefer a browser tab over a terminal? [`mazu-web`](https://github.com/turgutino/mazu-web) is a companion package — full parity with the commands above (chat, run, explore, council, checkpoints, memory, skills, router, usage, log, models, doctor, config, init, setup), streamed over the browser instead of printed to a terminal. Kept as a fully separate repo/package on purpose: the core `mazu` install stays terminal-first and dependency-light (no `flask`), and only pulls in a web stack if you explicitly install `mazu-web` on top.
+
+```bash
+pip install "mazu-web @ git+https://github.com/turgutino/mazu-web.git"
+cd your-project && mazu-web   # http://127.0.0.1:8765
+```
+
 ### Skills
 
 ```bash
@@ -442,7 +451,7 @@ The module map, the provider adapter seam, and how memory/checkpoints/skills fit
 
 ## Status & roadmap
 
-Milestones M1–M4 (bare tool loop, persistent memory, checkpoint/rollback, supervised autonomy) all have a working implementation, plus multi-provider support (five providers, including a fully local, no-API-key option), council mode, explore mode (parallel branch exploration with automatic test-based ranking), real-time streaming (`mazu chat`), context compaction (`mazu run`), dry-run mode, shell allowlists, a persistent agent action log (`mazu log`), resumable runs (`mazu run --resume`), branching checkpoints (`mazu run --from-checkpoint`, `mazu checkpoint compare-branches`), machine-readable `--json` output on the read-oriented commands, a model capability table (`mazu models`), persistent settings (`mazu config`), guided onboarding (`mazu setup`, `mazu doctor --fix`), a terminal UI (`mazu ui`), and optional semantic memory search. This has been exercised through live testing against real Anthropic, OpenAI, and DeepSeek API keys (Gemini live-verified for authentication; full generation blocked on that key's zero free-tier quota — see known gaps), plus a real local model served through LM Studio, plus a test suite (610 tests, zero API cost by default) running on every push via GitHub Actions across Python 3.11–3.13 on Linux/Windows/macOS. A [VS Code/Cursor extension design document](docs/vscode-extension-design.md) exists for a possible future editor integration — design only, not implemented; [CHANGELOG.md](CHANGELOG.md) has the version-by-version history.
+Milestones M1–M4 (bare tool loop, persistent memory, checkpoint/rollback, supervised autonomy) all have a working implementation, plus multi-provider support (five providers, including a fully local, no-API-key option), council mode, explore mode (parallel branch exploration with automatic test-based ranking), real-time streaming (`mazu chat`), context compaction (`mazu run`), dry-run mode, shell allowlists, a persistent agent action log (`mazu log`), resumable runs (`mazu run --resume`), branching checkpoints (`mazu run --from-checkpoint`, `mazu checkpoint compare-branches`), machine-readable `--json` output on the read-oriented commands, a model capability table (`mazu models`), persistent settings (`mazu config`), guided onboarding (`mazu setup`, `mazu doctor --fix`), a terminal UI (`mazu ui`), a separate [`mazu-web`](https://github.com/turgutino/mazu-web) browser companion with full command parity, and optional semantic memory search. This has been exercised through live testing against real Anthropic, OpenAI, and DeepSeek API keys (Gemini live-verified for authentication; full generation blocked on that key's zero free-tier quota — see known gaps), plus a real local model served through LM Studio, plus a test suite (650+ tests, zero API cost by default) running on every push via GitHub Actions across Python 3.11–3.13 on Linux/Windows/macOS. A [VS Code/Cursor extension design document](docs/vscode-extension-design.md) exists for a possible future editor integration — design only, not implemented; [CHANGELOG.md](CHANGELOG.md) has the version-by-version history.
 
 **Known gaps, honestly listed:**
 - Semantic search's 50/50 BM25/embedding blend weight is a fixed constant, not tuned against real usage data.
