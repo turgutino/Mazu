@@ -315,6 +315,12 @@ Forks N branches from your current checkpoint into real, isolated `git worktree`
 
 Nothing is ever auto-merged or auto-adopted — every branch's adoption command (`cd <worktree>`, or `git worktree remove ... && git checkout ...` to bring it back into the main repo) is printed for you to run yourself. `--approaches` is capped at 5 so a typo can't turn into an accidental large bill; `--max-cost` is shared across every branch, so one expensive branch can cut its siblings short instead of each one independently burning the full budget. `--allow-shell` is forced on for every branch (an unattended parallel branch can't answer an interactive confirmation prompt) — this is disclosed loudly every run, never silent; the hardcoded shell denylist still applies underneath it regardless.
 
+Don't want to type out `--models` by hand? `--auto-models` fills it in for you, ranked by this project's own router history for this kind of task (falling back to one model per other available provider for any slots history can't fill yet):
+
+```bash
+mazu explore "fix the intermittent test failure" --approaches 2 --auto-models --test-command "pytest -q"
+```
+
 ### Learning model router — suggestions from your own project's explore history
 
 Every `mazu explore` run leaves behind real, comparable outcomes (which model, what kind of task, whether tests passed, what it cost) instead of throwing them away once the report is printed. `mazu run`/`mazu chat` — when called with no `--model` and enough matching history exists in *this* project — print a passive suggestion based on that accumulated data:

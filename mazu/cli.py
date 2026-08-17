@@ -674,6 +674,40 @@ def ui_cmd() -> None:
     MazuApp(root).run()
 
 
+@main.command("web")
+@click.option("--host", default="127.0.0.1", show_default=True, help="Bind address. Keep this local -- there is no auth.")
+@click.option("--port", default=8765, show_default=True, type=int)
+@click.option("--model", default=None, help="Override the model for chat sessions started in this UI.")
+@click.option(
+    "--shell-allowlist",
+    default=None,
+    help="Comma-separated program names shell tool calls are restricted to, same as `mazu chat --shell-allowlist`.",
+)
+def web_cmd(host: str, port: int, model: str | None, shell_allowlist: str | None) -> None:
+    """Launch a local browser UI: chat (streamed, same rules as `mazu chat`), plus
+    read-only Checkpoints/Memory/Router tabs. Requires the current directory to
+    already be a Mazu project (`mazu init` first) and the optional `mazu[web]` extra.
+    Binds to localhost only by default -- there is no authentication, so do not
+    expose --host beyond your own machine."""
+    root = Path.cwd()
+    if not (root / ".mazu").exists():
+        click.echo("No .mazu/ here yet -- run `mazu init` first.")
+        return
+    # Deliberately no ensure_api_key() here -- Checkpoints/Memory/Router are read-only
+    # and need no key at all; only sending a chat message does, and a missing/invalid
+    # key surfaces as a normal chat error event in the browser instead of refusing to
+    # even serve the dashboard.
+    ensure_gitignore(root)
+    try:
+        from mazu.web.app import create_app
+    except ImportError:
+        click.echo('The web UI needs the "web" extra. Install it with: pip install "mazu[web]"')
+        return
+    app = create_app(root, model, _parse_shell_allowlist(shell_allowlist))
+    click.echo(f"mazu web running at http://{host}:{port} (Ctrl+C to stop)")
+    app.run(host=host, port=port, threaded=True)
+
+
 DEFAULT_COUNCIL_MODELS = "anthropic:claude-sonnet-5,anthropic:claude-opus-4-8"
 DEFAULT_COUNCIL_LEAD = "anthropic:claude-opus-4-8"
 
@@ -743,6 +777,47 @@ def council(question: str, models: str, lead: str, max_cost: float | None) -> No
         action_log_store.close()
 
 
+def _auto_pick_models(root: Path, task: str, approaches: int) -> list[str]:
+    """Ranks candidates by this project's own router history for this kind of task
+    (win rate desc, then cost asc -- same ordering `mazu router stats` prints), then
+    tops up with one model per other available provider (same auto-detect order as
+    default_model()) for any slots history can't fill yet. Raises UsageError rather
+    than padding with a repeated model -- an explore comparison with a duplicate
+    entry burns money for zero comparative signal.
+    """
+    import os
+
+    from mazu.llm.client import _PROVIDER_DEFAULT_MODELS, _PROVIDER_PRIORITY, _PROVIDERS
+    from mazu.runs.router import classify_task, model_stats_by_task_type
+
+    run_store = RunStore(_runs_db_path(root))
+    usage_store = UsageStore(_usage_db_path())
+    try:
+        task_type = classify_task(task)
+        stats = model_stats_by_task_type(run_store, usage_store, task_type=task_type)
+    finally:
+        run_store.close()
+        usage_store.close()
+
+    picks = [s.model for s in stats]  # already sorted: win rate desc, then cost asc
+    for provider_name in _PROVIDER_PRIORITY:
+        if os.environ.get(_PROVIDERS[provider_name].api_key_env):
+            candidate = _PROVIDER_DEFAULT_MODELS[provider_name]
+            if candidate not in picks:
+                picks.append(candidate)
+
+    if len(picks) < approaches:
+        raise click.UsageError(
+            f"--auto-models could only find {len(picks)} distinct model(s) (from router "
+            f"history for '{task_type}' tasks plus available provider API keys) but "
+            f"--approaches is {approaches}. Set more provider API keys, run more `mazu "
+            "explore` sessions first to build history, or pass --models explicitly."
+        )
+    picked = picks[:approaches]
+    click.echo(f"[auto-models] picked {', '.join(picked)} (task type: {task_type})")
+    return picked
+
+
 @main.command()
 @click.argument("task")
 @click.option(
@@ -758,6 +833,16 @@ def council(question: str, models: str, lead: str, max_cost: float | None) -> No
     help="Comma-separated provider:model list, one per approach -- required whenever "
     "--approaches is more than 1 (silently repeating the same default model would "
     "burn money with no comparative signal, so this refuses rather than guesses).",
+)
+@click.option(
+    "--auto-models",
+    is_flag=True,
+    default=False,
+    help="Fill --models automatically: this project's router history (see `mazu router "
+    "stats`) for this kind of task, ranked by past win rate, topped up with one model per "
+    "other available provider (detected the same way `mazu run` auto-detects a default "
+    "model). Mutually exclusive with --models. Fails loudly if fewer than --approaches "
+    "distinct models can be found, rather than silently repeating one.",
 )
 @click.option(
     "--from-checkpoint",
@@ -789,6 +874,7 @@ def explore(
     task: str,
     approaches: int,
     models: str | None,
+    auto_models: bool,
     from_checkpoint_id: str | None,
     test_command: str | None,
     max_cost: float | None,
@@ -805,20 +891,27 @@ def explore(
             f"--approaches {approaches} exceeds the maximum of {MAX_EXPLORE_APPROACHES} "
             "(a hard cap so a typo can't turn into an accidental large bill)."
         )
-    if approaches > 1 and not models:
-        raise click.UsageError(
-            "--models is required whenever --approaches is more than 1 -- pass one "
-            "provider:model per approach, e.g. --models "
-            "anthropic:claude-sonnet-5,deepseek:deepseek-chat."
-        )
-    model_list = [m.strip() for m in models.split(",") if m.strip()] if models else [None]
-    if len(model_list) != approaches:
-        raise click.UsageError(
-            f"--models lists {len(model_list)} model(s) but --approaches is {approaches} -- "
-            "these must match exactly, one model per branch."
-        )
+    if models and auto_models:
+        raise click.UsageError("--models and --auto-models cannot be combined -- pick one.")
 
     root = Path.cwd()
+
+    if auto_models:
+        model_list = _auto_pick_models(root, task, approaches)
+    else:
+        if approaches > 1 and not models:
+            raise click.UsageError(
+                "--models is required whenever --approaches is more than 1 -- pass one "
+                "provider:model per approach, e.g. --models "
+                "anthropic:claude-sonnet-5,deepseek:deepseek-chat, or use --auto-models."
+            )
+        model_list = [m.strip() for m in models.split(",") if m.strip()] if models else [None]
+        if len(model_list) != approaches:
+            raise click.UsageError(
+                f"--models lists {len(model_list)} model(s) but --approaches is {approaches} -- "
+                "these must match exactly, one model per branch."
+            )
+
     ensure_gitignore(root)
     checkpoint_manager = CheckpointManager(root)
 

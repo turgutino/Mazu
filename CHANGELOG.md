@@ -2,6 +2,12 @@
 
 All notable changes to Mazu are documented here, newest first. Format loosely follows [Keep a Changelog](https://keepachangelog.com/); Mazu doesn't yet promise strict semver (see [ROADMAP.md](ROADMAP.md) for what "1.0" would mean) — treat version bumps as "a meaningful batch of work shipped," not a compatibility contract.
 
+## 0.21.0 — `mazu explore --auto-models`: fill --models from the router's own history
+
+- **Added:** `mazu explore TASK --approaches N --auto-models` -- picks the N models to compare automatically instead of requiring `--models` to be typed out by hand. Ranks candidates by this project's own router history for the task's (locally classified) type -- same win-rate-desc/cost-asc ordering `mazu router stats` already prints -- and tops up any remaining slots with one model per other available provider (detected the same way `mazu run`'s default-model auto-detection already works). Mutually exclusive with `--models`; fails with a clear error (not a silently repeated model) if fewer than N distinct models can be found, telling you to add provider keys, build more history first, or fall back to `--models`.
+- This is the router closing its own loop one step further: `mazu explore` produces the history, `mazu router stats`/the passive `mazu run`/`mazu chat` suggestions surface it, and now `--auto-models` lets a *later* `mazu explore` comparison consume that same history to decide what to compare next, without the user needing to remember or retype which models have done well here before.
+- **Fixed (caught by this addendum's own tests before shipping):** the first draft of the provider-topping-up logic double-prefixed the provider name (`deepseek:deepseek:deepseek-chat`) because `_PROVIDER_DEFAULT_MODELS`'s values already include the `provider:` prefix -- caught immediately by `test_cli_auto_models_wires_the_picked_list_into_run_explore` before this ever reached a real run.
+
 ## 0.20.0 — Learning model router: suggestions from your own project's `mazu explore` history
 
 - **Added:** every `mazu explore` branch outcome (model, a local zero-cost task-type classification, cost via the existing `UsageStore`, and whether `--test-command` passed) is now persisted to the project's `.mazu/runs.db` instead of being discarded once the report prints. Two new nullable columns (`explore_group_id`, `test_passed`) added via the same additive-migration pattern as the existing lineage columns — raw facts only, never a stored "won" boolean, so ranking stays recomputable rather than frozen into history.
