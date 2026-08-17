@@ -34,6 +34,17 @@ CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
 # explicit ALTER TABLE migration instead (see __init__).
 LINEAGE_COLUMNS = ["origin_checkpoint_id", "parent_run_id", "branch_name"]
 
+# Same additive-migration reasoning as LINEAGE_COLUMNS, added later for `mazu
+# explore` (mazu/agent/explore.py) to record each branch's real outcome instead of
+# discarding it once the report is printed. explore_group_id ties every branch of
+# one `mazu explore` call together (NULL for an ordinary, non-explore run);
+# test_passed is a nullable INTEGER tri-state (1/0/NULL for passed/failed/no
+# --test-command given), mirroring the bool | None already used throughout
+# explore.py. Deliberately does NOT include cost -- that stays exclusively in
+# UsageStore, joined by session_id, so there is never a second, driftable copy of
+# spend data (see _run_one_branch's own existing re-join pattern).
+EXPLORE_OUTCOME_COLUMNS = {"explore_group_id": "TEXT", "test_passed": "INTEGER"}
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -55,6 +66,7 @@ class RunStore:
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
         self._migrate_lineage_columns()
+        self._migrate_explore_outcome_columns()
         self.conn.commit()
 
     def _migrate_lineage_columns(self) -> None:
@@ -62,6 +74,12 @@ class RunStore:
         for column in LINEAGE_COLUMNS:
             if column not in existing:
                 self.conn.execute(f"ALTER TABLE runs ADD COLUMN {column} TEXT")
+
+    def _migrate_explore_outcome_columns(self) -> None:
+        existing = {row["name"] for row in self.conn.execute("PRAGMA table_info(runs)")}
+        for column, sql_type in EXPLORE_OUTCOME_COLUMNS.items():
+            if column not in existing:
+                self.conn.execute(f"ALTER TABLE runs ADD COLUMN {column} {sql_type}")
 
     def start(
         self,
@@ -119,6 +137,20 @@ class RunStore:
             "UPDATE runs SET status = ?, stop_reason = ?, ended_at = ?, "
             "memories_saved = memories_saved + ? WHERE id = ?",
             (status, stop_reason, _now(), memories_saved, run_id),
+        )
+        self.conn.commit()
+
+    def set_explore_outcome(
+        self, run_id: str, explore_group_id: str, test_passed: bool | None
+    ) -> None:
+        """Records that `run_id` was one branch of a `mazu explore` comparison
+        (explore_group_id) and whether its --test-command passed, if one was given.
+        A separate method from finish() -- finish() is generic to every run
+        (mazu run included), these two fields are explore-specific.
+        """
+        self.conn.execute(
+            "UPDATE runs SET explore_group_id = ?, test_passed = ? WHERE id = ?",
+            (explore_group_id, None if test_passed is None else int(test_passed), run_id),
         )
         self.conn.commit()
 

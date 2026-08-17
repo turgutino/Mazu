@@ -315,6 +315,23 @@ Forks N branches from your current checkpoint into real, isolated `git worktree`
 
 Nothing is ever auto-merged or auto-adopted — every branch's adoption command (`cd <worktree>`, or `git worktree remove ... && git checkout ...` to bring it back into the main repo) is printed for you to run yourself. `--approaches` is capped at 5 so a typo can't turn into an accidental large bill; `--max-cost` is shared across every branch, so one expensive branch can cut its siblings short instead of each one independently burning the full budget. `--allow-shell` is forced on for every branch (an unattended parallel branch can't answer an interactive confirmation prompt) — this is disclosed loudly every run, never silent; the hardcoded shell denylist still applies underneath it regardless.
 
+### Learning model router — suggestions from your own project's explore history
+
+Every `mazu explore` run leaves behind real, comparable outcomes (which model, what kind of task, whether tests passed, what it cost) instead of throwing them away once the report is printed. `mazu run`/`mazu chat` — when called with no `--model` and enough matching history exists in *this* project — print a passive suggestion based on that accumulated data:
+
+```
+[router] DeepSeek has won most bug-fix explorations here (2/2, avg $0.0045) — consider --model deepseek:deepseek-chat.
+This is only a suggestion based on past `mazu explore` results in this project — never applied automatically.
+```
+
+```bash
+mazu router stats                       # win rate, pass rate, avg cost per model, all task types
+mazu router stats --task-type bugfix    # filtered to one task type
+mazu router stats --json
+```
+
+This never changes which model actually runs — `--model`/no-`--model` resolution is completely untouched by the router; the suggestion is only ever printed, never fed back into the run itself. Task-type classification is a local, zero-cost keyword heuristic (no extra API call on every plain run); suggestions only appear once at least 3 matching data points exist, and are scoped to the current project only — no cross-codebase inference. Turn it off with `mazu config set router_suggestions false`.
+
 ### Cost & usage tracking
 
 Every `mazu chat`, `mazu run`, and `mazu council` call is logged (provider, model, tokens, estimated cost) to a small local store at `~/.mazu/usage.db` — global across every project, since spend is tied to your API keys, not any one codebase.

@@ -26,7 +26,9 @@ _PROVIDER_KEY_ENV_VARS = {
     "deepseek_api_key": "DEEPSEEK_API_KEY",
     "gemini_api_key": "GEMINI_API_KEY",
 }
-KNOWN_CONFIG_KEYS = {"default_model", "api_key", "local_base_url", *_PROVIDER_KEY_ENV_VARS}
+KNOWN_CONFIG_KEYS = {
+    "default_model", "api_key", "local_base_url", "router_suggestions", *_PROVIDER_KEY_ENV_VARS
+}
 # Keys whose stored value is a secret -- `mazu config list` masks these, never
 # printing the real value. local_base_url is deliberately excluded: it's a URL, not
 # a secret, and showing it in plain text is what makes `mazu config list` useful for
@@ -34,6 +36,16 @@ KNOWN_CONFIG_KEYS = {"default_model", "api_key", "local_base_url", *_PROVIDER_KE
 _SECRET_CONFIG_KEYS = {"api_key", *_PROVIDER_KEY_ENV_VARS}
 
 _LOCAL_BASE_URL_DEFAULT = "http://localhost:1234/v1"  # LM Studio's default port
+
+
+def router_suggestions_enabled() -> bool:
+    """Default True. `mazu config set router_suggestions false` silences the
+    passive "based on past explorations, consider --model X" print in `mazu run`/
+    `mazu chat` -- useful for scripting/CI, where an unexpected extra printed line
+    could pollute captured output. Stored as a plain string ("true"/"false") like
+    every other config value; not a secret, not added to _SECRET_CONFIG_KEYS.
+    """
+    return _read_raw_config().get("router_suggestions", "true").lower() != "false"
 
 
 def _read_raw_config() -> dict:

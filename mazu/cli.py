@@ -19,6 +19,7 @@ from mazu.config import (
     config_path,
     ensure_api_key,
     list_config,
+    router_suggestions_enabled,
     set_config_value,
     unset_config_value,
 )
@@ -28,6 +29,7 @@ from mazu.memory.consolidate import apply_consolidation, find_duplicate_clusters
 from mazu.memory.retrieval import explain_retrieval
 from mazu.memory.store import FUZZY_DUPLICATE_THRESHOLD, MemoryStore
 from mazu.output import emit_json, row_to_dict
+from mazu.runs.router import TASK_TYPES, model_stats_by_task_type, suggest_model
 from mazu.runs.store import RunStore
 from mazu.skills.manager import SkillManager
 from mazu.tools.fs import make_fs_tools
@@ -76,6 +78,28 @@ def _usage_db_path() -> Path:
     # Global like global_memory.db — spend is tied to the person/API keys, not any
     # one project. A separate file on purpose (see UsageStore's docstring).
     return Path.home() / ".mazu" / "usage.db"
+
+
+def _print_router_suggestion(root: Path, task: str) -> None:
+    """Passive, best-effort suggestion based on this project's own `mazu explore`
+    history -- never applied automatically (see mazu/runs/router.py's module
+    docstring). Wrapped defensively: a suggestion feature must never be able to
+    crash or block a real `mazu run`/`mazu chat` invocation.
+    """
+    if not router_suggestions_enabled():
+        return
+    try:
+        run_store = RunStore(_runs_db_path(root))
+        usage_store = UsageStore(_usage_db_path())
+        try:
+            suggestion = suggest_model(run_store, usage_store, task)
+        finally:
+            run_store.close()
+            usage_store.close()
+        if suggestion:
+            click.echo(suggestion)
+    except Exception:
+        pass
 
 
 def _parse_shell_allowlist(raw: str | None) -> list[str] | None:
@@ -508,6 +532,8 @@ def run(
         raise click.UsageError("Provide a TASK, or use --resume <run_id> to continue an earlier run.")
 
     ensure_api_key(model)
+    if model is None and task is not None:
+        _print_router_suggestion(root, task)
 
     memory_store = MemoryStore(_memory_db_path(root))
     global_memory_store = MemoryStore(_global_memory_db_path())
@@ -578,6 +604,55 @@ def runs_cmd(limit: int, as_json: bool) -> None:
             f"step {r['last_step']}/{r['max_steps']}  checkpoints: {r['checkpoints_created']}  "
             f"{r['started_at']}"
         )
+
+
+@main.group("router")
+def router_group() -> None:
+    """Inspect the local, project-scoped `mazu explore` history that router
+    suggestions (the "[router] ... consider --model X" lines in `mazu run`/`mazu
+    chat`) are computed from -- nothing here is a black box."""
+
+
+@router_group.command("stats")
+@click.option(
+    "--task-type", default=None, type=click.Choice(TASK_TYPES),
+    help="Filter to one task type (see mazu/runs/router.py's keyword heuristic). "
+    "Omit to show stats across all explore history.",
+)
+@click.option(
+    "--json", "as_json", is_flag=True, default=False,
+    help="Emit machine-readable JSON instead of formatted text.",
+)
+def router_stats(task_type: str | None, as_json: bool) -> None:
+    """Win rate, average cost, and test-pass rate per model, aggregated from every
+    past `mazu explore` run in this project. This is the raw data any router
+    suggestion is derived from -- recomputed fresh each call, never cached."""
+    root = Path.cwd()
+    run_store = RunStore(_runs_db_path(root))
+    usage_store = UsageStore(_usage_db_path())
+    stats = model_stats_by_task_type(run_store, usage_store, task_type=task_type)
+    run_store.close()
+    usage_store.close()
+
+    if as_json:
+        emit_json(
+            [
+                {
+                    "model": s.model, "total": s.total, "wins": s.wins,
+                    "win_rate": s.win_rate, "tested": s.tested, "passed": s.passed,
+                    "pass_rate": s.pass_rate, "total_cost": s.total_cost, "avg_cost": s.avg_cost,
+                }
+                for s in stats
+            ]
+        )
+        return
+    if not stats:
+        suffix = f" for task type '{task_type}'" if task_type else ""
+        click.echo(f"No explore history recorded yet{suffix}.")
+        return
+    for s in stats:
+        pass_str = f", tests passed {s.passed}/{s.tested}" if s.tested else ""
+        click.echo(f"{s.model}: {s.wins}/{s.total} wins ({s.win_rate:.0%}), avg cost ~${s.avg_cost:.4f}{pass_str}")
 
 
 @main.command("ui")

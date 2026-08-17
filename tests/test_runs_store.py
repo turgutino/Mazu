@@ -99,3 +99,71 @@ def test_list_runs_respects_limit(store: RunStore):
 
 def test_list_runs_empty_store(store: RunStore):
     assert store.list_runs() == []
+
+
+# ---------------------------------------------------------------------------
+# explore-outcome columns (Learning Model Router addendum)
+# ---------------------------------------------------------------------------
+
+
+def test_new_db_already_has_explore_outcome_columns(store: RunStore):
+    columns = {row["name"] for row in store.conn.execute("PRAGMA table_info(runs)")}
+    assert "explore_group_id" in columns
+    assert "test_passed" in columns
+
+
+def test_migration_adds_explore_outcome_columns_to_a_pre_existing_db(tmp_path: Path):
+    """A .mazu/runs.db created before this addendum shipped has neither column --
+    opening it with the new RunStore must not crash, and must add the columns
+    (same regression shape as the existing lineage-column migration test)."""
+    db_path = tmp_path / "old_runs.db"
+    old = RunStore(db_path)
+    old.start("r1", "x", None, 15, 1, False, None, None, False)
+    old.close()
+
+    import sqlite3
+
+    raw = sqlite3.connect(db_path)
+    raw.execute("ALTER TABLE runs DROP COLUMN explore_group_id")
+    raw.execute("ALTER TABLE runs DROP COLUMN test_passed")
+    raw.commit()
+    raw.close()
+
+    migrated = RunStore(db_path)
+    columns = {row["name"] for row in migrated.conn.execute("PRAGMA table_info(runs)")}
+    assert "explore_group_id" in columns
+    assert "test_passed" in columns
+    row = migrated.get("r1")
+    assert row["explore_group_id"] is None
+    assert row["test_passed"] is None
+    migrated.close()
+
+
+def test_set_explore_outcome_writes_group_id_and_test_passed(store: RunStore):
+    store.start("r1", "x", None, 15, 1, False, None, None, False)
+    store.set_explore_outcome("r1", "abc12345", True)
+    row = store.get("r1")
+    assert row["explore_group_id"] == "abc12345"
+    assert row["test_passed"] == 1
+
+
+def test_set_explore_outcome_false_test_passed(store: RunStore):
+    store.start("r1", "x", None, 15, 1, False, None, None, False)
+    store.set_explore_outcome("r1", "abc12345", False)
+    row = store.get("r1")
+    assert row["test_passed"] == 0
+
+
+def test_set_explore_outcome_null_test_passed_when_no_test_command(store: RunStore):
+    store.start("r1", "x", None, 15, 1, False, None, None, False)
+    store.set_explore_outcome("r1", "abc12345", None)
+    row = store.get("r1")
+    assert row["explore_group_id"] == "abc12345"
+    assert row["test_passed"] is None
+
+
+def test_ordinary_run_has_null_explore_columns_by_default(store: RunStore):
+    store.start("r1", "x", None, 15, 1, False, None, None, False)
+    row = store.get("r1")
+    assert row["explore_group_id"] is None
+    assert row["test_passed"] is None

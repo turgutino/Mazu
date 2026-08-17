@@ -75,6 +75,21 @@ def _restore_snapshot_into_worktree(checkpoint_manager: CheckpointManager, check
         shutil.copytree(snapshot_skills, dest_mazu / "skills", dirs_exist_ok=True)
 
 
+def _rank_key(cost: float | None, test_passed: bool | None, has_test_command: bool) -> tuple[int, float]:
+    """Single source of truth for "who's winning" -- used both by format_explore_report
+    (ranking one in-memory list from a single `mazu explore` call) and by
+    mazu/runs/router.py (ranking accumulated history across many past calls), so the
+    live report and the historical "which model tends to win" analysis can never
+    silently define "won" two different ways. Test-pass status beats cost when a
+    test command was actually given; otherwise cost alone decides.
+    """
+    if has_test_command:
+        pass_rank = 0 if test_passed is True else (1 if test_passed is None else 2)
+    else:
+        pass_rank = 0
+    return (pass_rank, cost or 0.0)
+
+
 def _run_one_branch(
     model: str,
     branch_slug: str,
@@ -86,6 +101,7 @@ def _run_one_branch(
     shared_tracker: _SharedCostTracker,
     test_command: str | None,
     max_steps: int,
+    group_id: str,
 ) -> dict:
     """Worker-thread body: one branch's full autonomous run plus (optionally) its
     test evaluation. Never prints or logs directly -- SQLite connections aren't
@@ -149,8 +165,6 @@ def _run_one_branch(
     result_usage_store = UsageStore(usage_db_path)
     run_row = result_run_store.get(session_id)
     cost = result_usage_store.summary(session_id=session_id)["total_cost"]
-    result_run_store.close()
-    result_usage_store.close()
 
     test_passed: bool | None = None
     test_output_tail = ""
@@ -170,6 +184,15 @@ def _run_one_branch(
         except subprocess.TimeoutExpired:
             test_passed = False
             test_output_tail = f"(test command timed out after {_TEST_TIMEOUT_SECONDS}s)"
+
+    # A crashed branch (error is not None) never produced a meaningful comparison
+    # outcome -- leaving explore_group_id/test_passed NULL for it is correct (it's
+    # filtered out of the router's history at query time), not a gap.
+    if error is None:
+        result_run_store.set_explore_outcome(session_id, group_id, test_passed)
+
+    result_run_store.close()
+    result_usage_store.close()
 
     return {
         "model": model,
@@ -253,6 +276,7 @@ def run_explore(
                 shared_tracker,
                 test_command,
                 max_steps,
+                group_id,
             ): model
             for model, branch_slug, worktree_path in branch_specs
         }
@@ -262,7 +286,69 @@ def run_explore(
             print(f"[{model}] done")
             results.append(result)
 
+    _mirror_outcomes_into_origin_run_store(root, task, max_cost, results, group_id)
+
     return results
+
+
+def _mirror_outcomes_into_origin_run_store(
+    root: Path, task: str, max_cost: float | None, results: list[dict], group_id: str
+) -> None:
+    """Real bug caught in live testing: each branch's RunStore row is written into
+    ITS OWN worktree's `.mazu/runs.db` (necessary -- that's the project directory
+    the agent is actually operating in, and `mazu runs`/`--resume` run from inside
+    that worktree must see it). But mazu/runs/router.py's suggestions are queried
+    against the ORIGIN project's own `.mazu/runs.db`, which never saw these rows at
+    all -- `mazu router stats` silently showed "no history" forever, even right
+    after real explore runs. Mirrors a summary row into the origin's own RunStore
+    too, keyed by the SAME session_id (safe: session_id is a fresh uuid4 per
+    branch, and UsageStore -- where cost actually lives -- is global, keyed only by
+    session_id, so cost lookups against the mirrored row still resolve correctly
+    regardless of which RunStore file it's read back from).
+    """
+    origin_run_store = RunStore(root / ".mazu" / "runs.db")
+    try:
+        for r in results:
+            if r.get("error") is not None or r.get("run_row") is None:
+                continue
+            row = r["run_row"]
+            origin_run_store.start(
+                r["session_id"],
+                task,
+                r["model"],
+                row.get("max_steps") or DEFAULT_MAX_EXPLORE_STEPS,
+                row.get("checkpoint_every") or 1,
+                bool(row.get("allow_shell", True)),
+                None,
+                max_cost,
+                False,
+                branch_name=r["branch_name"],
+            )
+            origin_run_store.finish(
+                r["session_id"],
+                status=row.get("status") or "unknown",
+                stop_reason=row.get("stop_reason") or "unknown",
+            )
+            origin_run_store.set_explore_outcome(r["session_id"], group_id, r.get("test_passed"))
+            # start()/finish() alone leave last_step/checkpoints_created at their
+            # schema defaults (0) -- copy the branch's REAL final values from its
+            # own worktree row so `mazu runs`/`mazu router stats` in the origin
+            # project don't show a misleading "0 steps" for a run that actually
+            # took several. update_progress() isn't used here since it INCREMENTS
+            # checkpoints_created by 1 per call; this sets the final accumulated
+            # totals directly, in one shot.
+            origin_run_store.conn.execute(
+                "UPDATE runs SET last_step = ?, checkpoints_created = ?, last_checkpoint_id = ? WHERE id = ?",
+                (
+                    row.get("last_step") or 0,
+                    row.get("checkpoints_created") or 0,
+                    row.get("last_checkpoint_id"),
+                    r["session_id"],
+                ),
+            )
+            origin_run_store.conn.commit()
+    finally:
+        origin_run_store.close()
 
 
 def format_explore_report(results: list[dict], test_command: str | None) -> str:
@@ -274,15 +360,10 @@ def format_explore_report(results: list[dict], test_command: str | None) -> str:
     for the user to run themselves.
     """
 
-    def sort_key(r: dict) -> tuple[int, float]:
-        if test_command:
-            passed = r.get("test_passed")
-            pass_rank = 0 if passed is True else (1 if passed is None else 2)
-        else:
-            pass_rank = 0
-        return (pass_rank, r.get("cost") or 0.0)
-
-    ranked = sorted(results, key=sort_key)
+    ranked = sorted(
+        results,
+        key=lambda r: _rank_key(r.get("cost"), r.get("test_passed"), bool(test_command)),
+    )
 
     lines = ["=== Explore report ===", ""]
     for i, r in enumerate(ranked, 1):

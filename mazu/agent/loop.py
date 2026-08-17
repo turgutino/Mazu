@@ -1,17 +1,47 @@
+from pathlib import Path
+
 from mazu.action_log.store import ActionLogStore, record_action
 from mazu.agent.context import build_system_prompt
 from mazu.agent.interaction import safe_confirm
 from mazu.agent.session import finalize_session
 from mazu.banner import print_banner
 from mazu.checkpoint.manager import CheckpointManager
+from mazu.config import router_suggestions_enabled
 from mazu.llm.client import _split_model, default_model, run_turn_stream, summarize_usage
 from mazu.llm.errors import MazuAPIError
 from mazu.llm.pricing import estimate_cost
 from mazu.memory.store import MemoryStore
+from mazu.runs.router import suggest_model
+from mazu.runs.store import RunStore
 from mazu.skills.manager import SkillManager
 from mazu.tools.registry import ToolRegistry
 from mazu.tools.shell import denylist_reason, is_allowed_by_shell_allowlist
 from mazu.usage.store import UsageStore
+
+
+def _print_chat_router_suggestion(checkpoint_manager: CheckpointManager | None, task: str) -> None:
+    """Same passive, best-effort suggestion as mazu run's (see
+    mazu/cli.py::_print_router_suggestion and mazu/runs/router.py's module
+    docstring) -- `mazu chat` has no task text at session start, unlike `mazu run`,
+    so this is deferred to the first real user message instead. Uses
+    checkpoint_manager.root rather than taking a new `root` param, since chat's one
+    call site (mazu/cli.py::chat) always constructs a real CheckpointManager.
+    """
+    if checkpoint_manager is None or not router_suggestions_enabled():
+        return
+    try:
+        root = checkpoint_manager.root
+        run_store = RunStore(root / ".mazu" / "runs.db")
+        usage_store = UsageStore(Path.home() / ".mazu" / "usage.db")
+        try:
+            suggestion = suggest_model(run_store, usage_store, task)
+        finally:
+            run_store.close()
+            usage_store.close()
+        if suggestion:
+            print(suggestion)
+    except Exception:
+        pass
 
 
 def _confirm(tool_name: str, tool_input: dict) -> bool:
@@ -71,6 +101,8 @@ def run_chat_loop(
                 )
                 if system_prompt.strip() != "":
                     print("[memory] loaded prior context relevant to this task\n")
+                if model is None:
+                    _print_chat_router_suggestion(checkpoint_manager, user_input)
 
             messages.append({"role": "user", "content": user_input})
             total_cost = _run_until_done(

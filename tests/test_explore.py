@@ -153,6 +153,7 @@ def _make_fake_run_autonomous(cost_per_branch: dict):
     ):
         cost = cost_per_branch.get(model, 0.01)
         run_store.start(session_id, task, model, max_steps, 1, allow_shell, None, max_cost, False, branch_name=branch_name)
+        run_store.update_progress(session_id, 4, checkpoint_id="cp_000004")
         if usage_store is not None:
             usage_store.log("run", session_id, "fake", model or "fake-model", 100, 50, cost)
         if shared_cost_tracker is not None:
@@ -228,6 +229,44 @@ def test_run_explore_shared_cost_tracker_is_genuinely_shared(project, checkpoint
     assert captured_trackers[0] is captured_trackers[1]
     assert captured_trackers[0].total == pytest.approx(1.2)
     assert captured_trackers[0].is_exhausted() is True
+
+
+def test_run_explore_mirrors_outcomes_into_the_origin_projects_run_store(project, checkpoint_manager, monkeypatch):
+    """Real bug caught in live testing: each branch's RunStore row is written into
+    ITS OWN worktree's .mazu/runs.db (necessary for that worktree's own `mazu
+    runs`), but mazu/runs/router.py's suggestions and `mazu router stats` query the
+    ORIGIN project's own .mazu/runs.db -- which never saw these rows before this
+    fix, so `mazu router stats` silently showed "no history" forever, even right
+    after real explore runs. This asserts the mirror actually lands.
+    """
+    monkeypatch.setattr(
+        explore_module, "run_autonomous", _make_fake_run_autonomous({"model-a": 0.02, "model-b": 0.03})
+    )
+
+    results = run_explore(
+        "task", models=["model-a", "model-b"], root=project, checkpoint_manager=checkpoint_manager
+    )
+
+    origin_run_store = RunStore(project / ".mazu" / "runs.db")
+    for r in results:
+        mirrored = origin_run_store.get(r["session_id"])
+        assert mirrored is not None, f"no mirrored row in the origin project for {r['model']}"
+        assert mirrored["model"] == r["model"]
+        assert mirrored["branch_name"] == r["branch_name"]
+        assert mirrored["explore_group_id"] is not None
+        assert mirrored["status"] == "completed"
+        # Real bug: start()/finish() alone leave these at their schema defaults
+        # (0/None) -- the mirror must copy the branch's REAL final progress, not
+        # just create/finish a hollow row.
+        assert mirrored["last_step"] == 4
+        assert mirrored["checkpoints_created"] == 1
+        assert mirrored["last_checkpoint_id"] == "cp_000004"
+    # Both branches from one run_explore() call share the same explore_group_id in
+    # the ORIGIN's store too, not just each worktree's own (test_run_explore_branches_
+    # have_distinct_names already covers the worktree side).
+    group_ids = {origin_run_store.get(r["session_id"])["explore_group_id"] for r in results}
+    assert len(group_ids) == 1
+    origin_run_store.close()
 
 
 def test_run_explore_works_with_no_pre_existing_checkpoint(project, monkeypatch):
