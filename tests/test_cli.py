@@ -1234,6 +1234,76 @@ def test_setup_live_verify_failure_path_still_keeps_the_key(tmp_path, monkeypatc
     assert list_config()["deepseek_api_key"] == "sk-test-123"
 
 
+def test_setup_offers_to_install_a_missing_provider_package(tmp_path, monkeypatch):
+    """Real gap caught live: a fresh `pip install mazu` (no extras) + `mazu setup`
+    choosing deepseek would save a real, valid key, then fail verification with an
+    unrelated-looking "openai package isn't installed" error. Simulates a missing
+    package via a fake module name (never actually uninstalls the real `openai`
+    package this dev environment has) so the test doesn't depend on the local
+    environment's installed packages either way.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(
+        cli_module, "_SETUP_PROVIDER_PACKAGE", {"deepseek": ("definitely_not_a_real_module_xyz", "openai")}
+    )
+
+    installed = {}
+
+    def _fake_run(cmd, **kwargs):
+        installed["cmd"] = cmd
+        return type("R", (), {"returncode": 0})()
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
+
+    runner = CliRunner()
+    # provider=deepseek, install-now=y, key=..., verify=n, default_model=n, init=n
+    result = runner.invoke(main, ["setup"], input="deepseek\ny\nsk-test-123\nn\nn\nn\n")
+
+    assert result.exit_code == 0, result.output
+    assert 'need the "openai" extra' in result.output
+    assert installed["cmd"][-1] == "mazu[openai]"
+
+
+def test_setup_skips_install_but_still_saves_the_key_when_declined(tmp_path, monkeypatch):
+    from mazu.config import list_config
+
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(
+        cli_module, "_SETUP_PROVIDER_PACKAGE", {"deepseek": ("definitely_not_a_real_module_xyz", "openai")}
+    )
+
+    called = {"n": 0}
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: called.__setitem__("n", called["n"] + 1))
+
+    runner = CliRunner()
+    # provider=deepseek, install-now=n, key=..., verify=n, default_model=n, init=n
+    result = runner.invoke(main, ["setup"], input="deepseek\nn\nsk-test-123\nn\nn\nn\n")
+
+    assert result.exit_code == 0, result.output
+    assert called["n"] == 0  # never ran pip install
+    assert list_config()["deepseek_api_key"] == "sk-test-123"  # key still saved regardless
+
+
+def test_setup_never_prompts_for_a_package_when_anthropic_is_already_covered(tmp_path, monkeypatch):
+    """anthropic is a core dependency (installed unconditionally by `pip install
+    mazu`), so it's deliberately absent from _SETUP_PROVIDER_PACKAGE -- this must
+    never trigger an install prompt no matter what's actually importable.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["setup"], input="anthropic\nsk-test-123\nn\nn\nn\n")
+
+    assert result.exit_code == 0, result.output
+    assert "extra" not in result.output
+
+
 def test_setup_help_documents_the_command():
     runner = CliRunner()
     result = runner.invoke(main, ["setup", "--help"])

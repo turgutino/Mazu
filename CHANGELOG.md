@@ -2,6 +2,10 @@
 
 All notable changes to Mazu are documented here, newest first. Format loosely follows [Keep a Changelog](https://keepachangelog.com/); Mazu doesn't yet promise strict semver (see [ROADMAP.md](ROADMAP.md) for what "1.0" would mean) — treat version bumps as "a meaningful batch of work shipped," not a compatibility contract.
 
+## 0.21.2 — `mazu setup` offers to install a missing provider package before asking for the key
+
+- **Fixed:** a real gap caught via live testing on a fresh `pip install mazu` (no extras) -- choosing `deepseek`/`openai`/`gemini` in `mazu setup` saved a real, valid key, then immediately failed live verification with an unrelated-looking "The openai package isn't installed" error. The key itself was never the problem; the wizard just never checked for the provider's client library before asking for the key. `mazu setup` now checks whether the provider's client library is importable right after picking a provider, *before* prompting for the key, and offers to `pip install mazu[<extra>]` on the spot if it's missing. `anthropic` is unaffected (it's a core dependency, installed unconditionally). Declining the install still saves the key -- setup doesn't block on it, just can't verify until the package is there.
+
 ## 0.21.1 — Fix `mazu doctor` false "no API key set" for keys saved via `mazu setup`/`config set`
 
 - **Fixed:** a real bug caught via live testing on a fresh install -- `mazu doctor` (and `mazu doctor --live`) reported "no provider has a key set" and FAILed even immediately after `mazu chat` had just worked correctly against a key saved via `mazu setup`. Root cause: `ensure_api_key()`/`default_model()` (every real code path) call `load_config()` first, which injects any `mazu config set`/`mazu setup`-saved key from `~/.mazu/config.toml` into the environment (only if the env var isn't already set) -- but `check_api_keys()` (doctor's underlying check) never called `load_config()`, so it only ever saw literal environment variables, never config-file-stored keys. `mazu doctor` now calls `load_config()` first too, matching every other real resolution path.

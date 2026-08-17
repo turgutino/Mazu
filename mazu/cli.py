@@ -190,6 +190,56 @@ def doctor(live: bool, fix: bool) -> None:
 
 _SETUP_PROVIDER_CHOICES = ["anthropic", "openai", "deepseek", "gemini"]
 
+# provider -> (module to import-check, pip extra name). Only providers whose
+# client library isn't a core dependency need an entry here -- anthropic is
+# installed unconditionally by `pip install mazu` itself, so it's deliberately
+# absent. deepseek reuses the `openai` package (its API is OpenAI-compatible),
+# hence the shared entry.
+_SETUP_PROVIDER_PACKAGE = {
+    "openai": ("openai", "openai"),
+    "deepseek": ("openai", "openai"),
+    "gemini": ("google.genai", "gemini"),
+}
+
+
+def _ensure_setup_provider_package(provider_name: str) -> bool:
+    """Real gap caught live: a fresh `pip install mazu` (no extras) + `mazu setup`
+    choosing deepseek/openai/gemini would save a real, valid key, then immediately
+    fail verification with an unrelated-looking "package isn't installed" error --
+    the key itself was never the problem. Checked (and offered to fix) *before*
+    asking for the key, not after. Returns False only if the user declines the
+    install and the package still isn't importable (setup continues regardless --
+    the key still gets saved either way, just unverifiable until the package is
+    there).
+    """
+    entry = _SETUP_PROVIDER_PACKAGE.get(provider_name)
+    if entry is None:
+        return True
+    module_name, extra_name = entry
+    try:
+        __import__(module_name)
+        return True
+    except ImportError:
+        pass
+
+    click.echo(
+        f"\n{provider_name} models need the \"{extra_name}\" extra, which isn't "
+        f"installed yet (pip install \"mazu[{extra_name}]\")."
+    )
+    if not click.confirm("Install it now?", default=True):
+        click.echo("Skipping -- the key will still be saved, but verification below will fail until it's installed.\n")
+        return False
+
+    import subprocess
+    import sys
+
+    result = subprocess.run([sys.executable, "-m", "pip", "install", f"mazu[{extra_name}]"])
+    if result.returncode != 0:
+        click.echo(f"Install failed (exit {result.returncode}) -- continuing anyway; try `pip install mazu[{extra_name}]` yourself.\n")
+        return False
+    click.echo()
+    return True
+
 
 @main.command("setup")
 def setup_wizard() -> None:
@@ -207,6 +257,8 @@ def setup_wizard() -> None:
     )
     provider = _PROVIDERS[provider_name]
     env_var = provider.api_key_env
+
+    _ensure_setup_provider_package(provider_name)
 
     key = click.prompt(f"Paste your {env_var}", hide_input=True)
     config_key = f"{provider_name}_api_key"
