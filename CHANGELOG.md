@@ -2,6 +2,10 @@
 
 All notable changes to Mazu are documented here, newest first. Format loosely follows [Keep a Changelog](https://keepachangelog.com/); Mazu doesn't yet promise strict semver (see [ROADMAP.md](ROADMAP.md) for what "1.0" would mean) — treat version bumps as "a meaningful batch of work shipped," not a compatibility contract.
 
+## 0.21.1 — Fix `mazu doctor` false "no API key set" for keys saved via `mazu setup`/`config set`
+
+- **Fixed:** a real bug caught via live testing on a fresh install -- `mazu doctor` (and `mazu doctor --live`) reported "no provider has a key set" and FAILed even immediately after `mazu chat` had just worked correctly against a key saved via `mazu setup`. Root cause: `ensure_api_key()`/`default_model()` (every real code path) call `load_config()` first, which injects any `mazu config set`/`mazu setup`-saved key from `~/.mazu/config.toml` into the environment (only if the env var isn't already set) -- but `check_api_keys()` (doctor's underlying check) never called `load_config()`, so it only ever saw literal environment variables, never config-file-stored keys. `mazu doctor` now calls `load_config()` first too, matching every other real resolution path.
+
 ## 0.21.0 — `mazu explore --auto-models`: fill --models from the router's own history
 
 - **Added:** `mazu explore TASK --approaches N --auto-models` -- picks the N models to compare automatically instead of requiring `--models` to be typed out by hand. Ranks candidates by this project's own router history for the task's (locally classified) type -- same win-rate-desc/cost-asc ordering `mazu router stats` already prints -- and tops up any remaining slots with one model per other available provider (detected the same way `mazu run`'s default-model auto-detection already works). Mutually exclusive with `--models`; fails with a clear error (not a silently repeated model) if fewer than N distinct models can be found, telling you to add provider keys, build more history first, or fall back to `--models`.

@@ -111,6 +111,29 @@ def test_non_ascii_key_reports_fail(monkeypatch):
     assert "non-ASCII" in deepseek_result.message
 
 
+def test_key_saved_via_config_toml_reports_ok_not_fail(monkeypatch):
+    """Real bug caught via live testing: `mazu setup`/`mazu config set` save a key
+    to config.toml, not an env var. Every real call site (ensure_api_key(),
+    default_model()) calls load_config() first, which injects a config.toml key
+    into os.environ if the env var isn't already set -- but check_api_keys() used
+    to skip that step entirely, so `mazu doctor` reported "no provider has a key
+    set" and FAILed even right after a real `mazu chat` session had just worked
+    fine against that same config.toml-stored key.
+    """
+    from mazu.config import set_config_value
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    set_config_value("deepseek_api_key", "sk-fake-from-config")
+
+    results = check_api_keys()
+
+    deepseek_result = next(r for r in results if r.name.startswith("deepseek"))
+    assert deepseek_result.status == "ok"
+    assert not any(r.status == "fail" for r in results)
+
+
 # ---------------------------------------------------------------------------
 # check_project_git_repo / check_gitignore
 # ---------------------------------------------------------------------------

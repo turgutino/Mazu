@@ -66,7 +66,16 @@ def check_openai_package() -> CheckResult:
 
 
 def check_api_keys() -> list[CheckResult]:
+    # Real bug caught via live testing: every real call site (ensure_api_key(),
+    # default_model()) calls load_config() first, which injects any key saved via
+    # `mazu setup`/`mazu config set` into os.environ (if the env var isn't already
+    # set) -- but this check never did, so `mazu doctor` reported "no provider has
+    # a key set" and FAILed even for a project where `mazu chat` was working fine
+    # against a config.toml-stored key moments earlier.
+    from mazu.config import load_config
     from mazu.llm.client import _PROVIDERS
+
+    load_config()
 
     results = []
     any_present = False
