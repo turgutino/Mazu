@@ -674,40 +674,6 @@ def ui_cmd() -> None:
     MazuApp(root).run()
 
 
-@main.command("web")
-@click.option("--host", default="127.0.0.1", show_default=True, help="Bind address. Keep this local -- there is no auth.")
-@click.option("--port", default=8765, show_default=True, type=int)
-@click.option("--model", default=None, help="Override the model for chat sessions started in this UI.")
-@click.option(
-    "--shell-allowlist",
-    default=None,
-    help="Comma-separated program names shell tool calls are restricted to, same as `mazu chat --shell-allowlist`.",
-)
-def web_cmd(host: str, port: int, model: str | None, shell_allowlist: str | None) -> None:
-    """Launch a local browser UI: chat (streamed, same rules as `mazu chat`), plus
-    read-only Checkpoints/Memory/Router tabs. Requires the current directory to
-    already be a Mazu project (`mazu init` first) and the optional `mazu[web]` extra.
-    Binds to localhost only by default -- there is no authentication, so do not
-    expose --host beyond your own machine."""
-    root = Path.cwd()
-    if not (root / ".mazu").exists():
-        click.echo("No .mazu/ here yet -- run `mazu init` first.")
-        return
-    # Deliberately no ensure_api_key() here -- Checkpoints/Memory/Router are read-only
-    # and need no key at all; only sending a chat message does, and a missing/invalid
-    # key surfaces as a normal chat error event in the browser instead of refusing to
-    # even serve the dashboard.
-    ensure_gitignore(root)
-    try:
-        from mazu.web.app import create_app
-    except ImportError:
-        click.echo('The web UI needs the "web" extra. Install it with: pip install "mazu[web]"')
-        return
-    app = create_app(root, model, _parse_shell_allowlist(shell_allowlist))
-    click.echo(f"mazu web running at http://{host}:{port} (Ctrl+C to stop)")
-    app.run(host=host, port=port, threaded=True)
-
-
 DEFAULT_COUNCIL_MODELS = "anthropic:claude-sonnet-5,anthropic:claude-opus-4-8"
 DEFAULT_COUNCIL_LEAD = "anthropic:claude-opus-4-8"
 
