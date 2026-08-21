@@ -159,6 +159,20 @@ def check_gitignore(root: Path) -> CheckResult:
     )
 
 
+def check_curator() -> CheckResult:
+    """Purely informational, never "fail" -- Curator being unconfigured is the
+    normal, fully-supported default state (see mazu/curator/config.py's
+    curator_configured()), not a problem to warn about like a missing main-model
+    key would be."""
+    from mazu.curator.config import curator_configured, curator_enabled, curator_model
+
+    if not curator_configured():
+        return CheckResult("curator", "ok", "not configured (optional -- see `mazu curator setup`)")
+    if not curator_enabled():
+        return CheckResult("curator", "ok", f"configured ({curator_model()}) but disabled")
+    return CheckResult("curator", "ok", f"configured and enabled ({curator_model()})")
+
+
 def run_diagnostics(root: Path, live: bool = False) -> list[CheckResult]:
     results = [
         check_python_version(),
@@ -167,6 +181,7 @@ def run_diagnostics(root: Path, live: bool = False) -> list[CheckResult]:
         *check_api_keys(),
         check_project_git_repo(root),
         check_gitignore(root),
+        check_curator(),
     ]
     if live:
         from mazu.llm.client import _PROVIDER_DEFAULT_MODELS, _PROVIDERS

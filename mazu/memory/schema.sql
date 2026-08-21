@@ -19,7 +19,13 @@ CREATE TABLE IF NOT EXISTS memories (
     -- build_global_context_block), not on every DB read. NULL last_used_at means
     -- never retrieved since creation.
     retrieval_count INTEGER NOT NULL DEFAULT 0,
-    last_used_at    TEXT
+    last_used_at    TEXT,
+    -- Set by `mazu memory archive` / `mazu memory stale --auto`: removed from
+    -- all_active()/search()/context injection like superseded_by, but (unlike
+    -- superseded_by) with no replacement memory -- this is "retired, nothing took
+    -- its place" rather than "replaced by something newer". Reversible via
+    -- `mazu memory unarchive`, unlike forget() (a real, permanent DELETE).
+    archived        INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);

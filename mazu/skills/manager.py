@@ -36,39 +36,140 @@ class SkillManager:
         return self.skills_dir / name
 
     def save(self, name: str, description: str, code: str, tags: str = "") -> None:
+        """Writes/overwrites the skill's code, but MERGES meta.json over any
+        existing entry rather than replacing it wholesale -- previously this reset
+        usage_count/created_at to 0/now on every save, which would destroy a
+        skill's own usage evidence the moment anything (a human, or Curator)
+        rewrote its code to fix a bug. New/never-seen fields (archived,
+        success_count, curator_revision, ...) default sensibly for a first save.
+        """
         if not NAME_RE.match(name):
             raise ValueError(
                 "name must be a valid identifier: letters, digits, underscore, not starting with a digit"
             )
         if "def run(" not in code:
             raise ValueError("code must define a function `def run(args: dict) -> str:`")
+        if '__name__ == "__main__"' in code or "__name__ == '__main__'" in code:
+            # Real bug caught via live testing: `code` must be ONLY the `def run(...)`
+            # function body -- SKILL_TEMPLATE below already supplies the
+            # `if __name__ == "__main__":` entry point and imports. A caller (human
+            # or an LLM tool call, e.g. Curator's write_skill) that pastes a
+            # complete standalone script -- including its own copy of that guard --
+            # would otherwise get it wrapped a SECOND time by SKILL_TEMPLATE.format,
+            # producing a file with the guard duplicated. Both copies execute when
+            # the file runs as __main__: the first reads stdin and returns the
+            # correct answer, but the second then re-reads (now-exhausted) stdin,
+            # gets `{}`, and crashes -- so the skill looks fixed (right code, right
+            # reasoning) but is actually broken on every single invocation. Failing
+            # loudly here beats silently shipping a skill that's broken this way.
+            raise ValueError(
+                "code must be ONLY the `def run(args: dict) -> str:` function body -- "
+                "do not include imports, an `if __name__ == \"__main__\":` block, or any "
+                "other script boilerplate; that wrapper is added automatically."
+            )
         skill_dir = self._dir(name)
         skill_dir.mkdir(parents=True, exist_ok=True)
         (skill_dir / "skill.py").write_text(SKILL_TEMPLATE.format(code=code), encoding="utf-8")
+
+        existing = self.get_meta(name) or {}
         meta = {
             "name": name,
             "description": description,
             "tags": tags,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "usage_count": 0,
-            "last_used_at": None,
+            "created_at": existing.get("created_at", datetime.now(timezone.utc).isoformat()),
+            "usage_count": existing.get("usage_count", 0),
+            "last_used_at": existing.get("last_used_at"),
+            "archived": existing.get("archived", False),
+            "archived_at": existing.get("archived_at"),
+            "archived_reason": existing.get("archived_reason"),
+            "superseded_by": existing.get("superseded_by"),
+            "success_count": existing.get("success_count", 0),
+            "failure_count": existing.get("failure_count", 0),
+            "last_outcome": existing.get("last_outcome"),
+            "curator_revision": existing.get("curator_revision", 0),
+            "curator_last_edited_at": existing.get("curator_last_edited_at"),
         }
-        (skill_dir / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        self._write_meta(name, meta)
 
-    def list(self) -> list[dict]:
+    def get_meta(self, name: str) -> dict | None:
+        meta_path = self._dir(name) / "meta.json"
+        if not meta_path.exists():
+            return None
+        try:
+            return json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+    def _write_meta(self, name: str, meta: dict) -> None:
+        (self._dir(name) / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+
+    def read_code(self, name: str) -> str | None:
+        skill_path = self._dir(name) / "skill.py"
+        if not skill_path.exists():
+            return None
+        return skill_path.read_text(encoding="utf-8")
+
+    def list(self, include_archived: bool = False) -> list[dict]:
         if not self.skills_dir.exists():
             return []
         metas = []
         for meta_file in sorted(self.skills_dir.glob("*/meta.json")):
             try:
-                metas.append(json.loads(meta_file.read_text(encoding="utf-8")))
+                meta = json.loads(meta_file.read_text(encoding="utf-8"))
             except Exception as e:
                 print(f"[skills] warning: could not read {meta_file}: {e}")
                 continue
+            if meta.get("archived") and not include_archived:
+                continue
+            metas.append(meta)
         return metas
 
     def exists(self, name: str) -> bool:
         return (self._dir(name) / "skill.py").exists()
+
+    def archive(self, name: str, reason: str | None = None) -> bool:
+        """Reversible retirement -- mirrors MemoryStore.archive()'s semantics.
+        The skill's code and directory stay on disk; it just stops appearing in
+        list()/build_context_block()'s default (active-only) view."""
+        meta = self.get_meta(name)
+        if meta is None:
+            return False
+        meta["archived"] = True
+        meta["archived_at"] = datetime.now(timezone.utc).isoformat()
+        meta["archived_reason"] = reason
+        self._write_meta(name, meta)
+        return True
+
+    def unarchive(self, name: str) -> bool:
+        meta = self.get_meta(name)
+        if meta is None:
+            return False
+        meta["archived"] = False
+        meta["archived_at"] = None
+        meta["archived_reason"] = None
+        self._write_meta(name, meta)
+        return True
+
+    def update_meta(self, name: str, **fields) -> bool:
+        meta = self.get_meta(name)
+        if meta is None:
+            return False
+        meta.update(fields)
+        self._write_meta(name, meta)
+        return True
+
+    def supersede(self, old_name: str, new_name: str) -> bool:
+        """Mirrors MemoryStore.supersede() -- old_name is archived (not deleted)
+        and tagged with which skill replaced it, for the same audit-trail reason."""
+        old_meta = self.get_meta(old_name)
+        if old_meta is None or self.get_meta(new_name) is None:
+            return False
+        old_meta["archived"] = True
+        old_meta["archived_at"] = datetime.now(timezone.utc).isoformat()
+        old_meta["archived_reason"] = f"superseded by {new_name}"
+        old_meta["superseded_by"] = new_name
+        self._write_meta(old_name, old_meta)
+        return True
 
     def run(self, name: str, args: dict, timeout: int = 60) -> tuple[str, bool]:
         skill_path = self._dir(name) / "skill.py"

@@ -8,6 +8,7 @@ import pytest
 from mazu.diagnostics import (
     apply_fixes,
     check_api_keys,
+    check_curator,
     check_git_available,
     check_gitignore,
     check_live_api_key,
@@ -307,3 +308,46 @@ def test_apply_fixes_is_idempotent(tmp_path: Path):
     apply_fixes(tmp_path)
     second_pass = apply_fixes(tmp_path)
     assert second_pass == []
+
+
+# ---------------------------------------------------------------------------
+# check_curator -- always "ok", never "fail"/"warn": unconfigured is the normal,
+# fully-supported default state, not a problem.
+# ---------------------------------------------------------------------------
+
+
+def test_check_curator_ok_when_unconfigured():
+    result = check_curator()
+    assert result.status == "ok"
+    assert "not configured" in result.message
+
+
+def test_check_curator_ok_and_shows_model_when_configured():
+    from mazu.config import set_config_value
+
+    set_config_value("curator_api_key", "sk-curator-secret")
+    set_config_value("curator_model", "anthropic:claude-haiku-4-5")
+
+    result = check_curator()
+    assert result.status == "ok"
+    assert "anthropic:claude-haiku-4-5" in result.message
+    assert "enabled" in result.message
+
+
+def test_check_curator_reports_disabled_state():
+    from mazu.config import set_config_value
+
+    set_config_value("curator_api_key", "sk-curator-secret")
+    set_config_value("curator_model", "anthropic:claude-haiku-4-5")
+    set_config_value("curator_enabled", "false")
+
+    result = check_curator()
+    assert result.status == "ok"
+    assert "disabled" in result.message
+
+
+def test_run_diagnostics_includes_curator_check(tmp_path: Path):
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+    results = run_diagnostics(tmp_path)
+    names = {r.name for r in results}
+    assert "curator" in names

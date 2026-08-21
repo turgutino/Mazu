@@ -63,7 +63,7 @@ class AnthropicProvider(Provider):
                     "real API key. It looks like it was set to a placeholder or example "
                     f"value by mistake. Set {self.api_key_env} to your actual key and try again."
                 )
-            self._client = Anthropic()
+            self._client = Anthropic(api_key=api_key)
         return self._client
 
     def run_turn(

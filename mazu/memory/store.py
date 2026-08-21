@@ -67,6 +67,9 @@ class MemoryStore:
         if "last_used_at" not in columns:
             self.conn.execute("ALTER TABLE memories ADD COLUMN last_used_at TEXT")
             self.conn.commit()
+        if "archived" not in columns:
+            self.conn.execute("ALTER TABLE memories ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
+            self.conn.commit()
 
     def add(
         self,
@@ -130,7 +133,7 @@ class MemoryStore:
     def search(
         self, query: str = "", category: str | None = None, limit: int = 20
     ) -> list[sqlite3.Row]:
-        sql = "SELECT * FROM memories WHERE superseded_by IS NULL"
+        sql = "SELECT * FROM memories WHERE superseded_by IS NULL AND archived = 0"
         params: list = []
         if category:
             sql += " AND category = ?"
@@ -145,21 +148,29 @@ class MemoryStore:
 
     def recent_by_category(self, category: str, limit: int = 3) -> list[sqlite3.Row]:
         return self.conn.execute(
-            "SELECT * FROM memories WHERE category = ? AND superseded_by IS NULL "
+            "SELECT * FROM memories WHERE category = ? AND superseded_by IS NULL AND archived = 0 "
             "ORDER BY created_at DESC LIMIT ?",
             (category, limit),
         ).fetchall()
 
     def pinned(self) -> list[sqlite3.Row]:
         return self.conn.execute(
-            "SELECT * FROM memories WHERE pinned = 1 AND superseded_by IS NULL "
+            "SELECT * FROM memories WHERE pinned = 1 AND superseded_by IS NULL AND archived = 0 "
             "ORDER BY created_at DESC"
         ).fetchall()
 
     def all_active(self, limit: int = 10000) -> list[sqlite3.Row]:
         return self.conn.execute(
-            "SELECT * FROM memories WHERE superseded_by IS NULL "
+            "SELECT * FROM memories WHERE superseded_by IS NULL AND archived = 0 "
             "ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+
+    def list_archived(self, limit: int = 200) -> list[sqlite3.Row]:
+        """Rows retired via archive()/`mazu memory stale --auto`, most recently archived first.
+        Superseded rows aren't included here -- they have their own audit trail via supersede()."""
+        return self.conn.execute(
+            "SELECT * FROM memories WHERE archived = 1 ORDER BY updated_at DESC LIMIT ?",
             (limit,),
         ).fetchall()
 
@@ -213,35 +224,45 @@ class MemoryStore:
         self.conn.commit()
 
     def stats(self) -> dict:
+        # "active" matches all_active()'s own definition exactly (not superseded,
+        # not archived) -- these were the same condition before `archived` existed,
+        # now genuinely two different reasons a row can be retired.
         total = self.conn.execute("SELECT COUNT(*) c FROM memories").fetchone()["c"]
         active = self.conn.execute(
-            "SELECT COUNT(*) c FROM memories WHERE superseded_by IS NULL"
+            "SELECT COUNT(*) c FROM memories WHERE superseded_by IS NULL AND archived = 0"
+        ).fetchone()["c"]
+        superseded = self.conn.execute(
+            "SELECT COUNT(*) c FROM memories WHERE superseded_by IS NOT NULL"
+        ).fetchone()["c"]
+        archived = self.conn.execute(
+            "SELECT COUNT(*) c FROM memories WHERE archived = 1"
         ).fetchone()["c"]
         pinned = self.conn.execute(
-            "SELECT COUNT(*) c FROM memories WHERE pinned = 1 AND superseded_by IS NULL"
+            "SELECT COUNT(*) c FROM memories WHERE pinned = 1 AND superseded_by IS NULL AND archived = 0"
         ).fetchone()["c"]
         by_category = {
             row["category"]: row["c"]
             for row in self.conn.execute(
-                "SELECT category, COUNT(*) c FROM memories WHERE superseded_by IS NULL GROUP BY category"
+                "SELECT category, COUNT(*) c FROM memories WHERE superseded_by IS NULL AND archived = 0 GROUP BY category"
             )
         }
         by_source = {
             row["source"]: row["c"]
             for row in self.conn.execute(
-                "SELECT source, COUNT(*) c FROM memories WHERE superseded_by IS NULL GROUP BY source"
+                "SELECT source, COUNT(*) c FROM memories WHERE superseded_by IS NULL AND archived = 0 GROUP BY source"
             )
         }
         oldest = self.conn.execute(
-            "SELECT * FROM memories WHERE superseded_by IS NULL ORDER BY created_at ASC LIMIT 1"
+            "SELECT * FROM memories WHERE superseded_by IS NULL AND archived = 0 ORDER BY created_at ASC LIMIT 1"
         ).fetchone()
         newest = self.conn.execute(
-            "SELECT * FROM memories WHERE superseded_by IS NULL ORDER BY created_at DESC LIMIT 1"
+            "SELECT * FROM memories WHERE superseded_by IS NULL AND archived = 0 ORDER BY created_at DESC LIMIT 1"
         ).fetchone()
         return {
             "total": total,
             "active": active,
-            "superseded": total - active,
+            "superseded": superseded,
+            "archived": archived,
             "pinned": pinned,
             "by_category": by_category,
             "by_source": by_source,
@@ -261,6 +282,27 @@ class MemoryStore:
         cur = self.conn.execute(
             "UPDATE memories SET superseded_by = ?, updated_at = ? WHERE id = ?",
             (new_id, _now(), old_id),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def archive(self, memory_id: int) -> bool:
+        """Like supersede(), but for `mazu memory stale`'s use case: retiring a
+        memory that's gone unused for a long time, with no specific replacement to
+        point superseded_by at. Reversible via unarchive() -- unlike forget()
+        (a real DELETE), the row and its full history stay in the database.
+        """
+        cur = self.conn.execute(
+            "UPDATE memories SET archived = 1, updated_at = ? WHERE id = ?",
+            (_now(), memory_id),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def unarchive(self, memory_id: int) -> bool:
+        cur = self.conn.execute(
+            "UPDATE memories SET archived = 0, updated_at = ? WHERE id = ?",
+            (_now(), memory_id),
         )
         self.conn.commit()
         return cur.rowcount > 0

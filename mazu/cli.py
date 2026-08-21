@@ -23,10 +23,14 @@ from mazu.config import (
     set_config_value,
     unset_config_value,
 )
+from mazu.curator.config import curator_configured, curator_enabled, curator_model
+from mazu.curator.orchestrator import run_curator
+from mazu.curator.store import CuratorStore
 from mazu.diagnostics import apply_fixes, check_live_api_key, ensure_gitignore, run_diagnostics
 from mazu.llm.capabilities import list_capabilities
 from mazu.memory.consolidate import apply_consolidation, find_duplicate_clusters
 from mazu.memory.retrieval import explain_retrieval
+from mazu.memory.staleness import DEFAULT_STALE_DAYS, apply_archival, find_stale_candidates
 from mazu.memory.store import FUZZY_DUPLICATE_THRESHOLD, MemoryStore
 from mazu.output import emit_json, row_to_dict
 from mazu.runs.router import TASK_TYPES, model_stats_by_task_type, suggest_model
@@ -734,16 +738,16 @@ DEFAULT_COUNCIL_LEAD = "anthropic:claude-opus-4-8"
 @click.argument("question")
 @click.option(
     "--models",
-    default=DEFAULT_COUNCIL_MODELS,
-    show_default=True,
+    default=None,
     help="Comma-separated provider:model list to ask independently, e.g. "
-    "'anthropic:claude-sonnet-5,openai:gpt-5'.",
+    "'anthropic:claude-sonnet-5,openai:gpt-5'. Defaults to `mazu config set "
+    f"council_models ...` if set, else '{DEFAULT_COUNCIL_MODELS}'.",
 )
 @click.option(
     "--lead",
-    default=DEFAULT_COUNCIL_LEAD,
-    show_default=True,
-    help="Model that reviews all answers and gives the final recommendation.",
+    default=None,
+    help="Model that reviews all answers and gives the final recommendation. Defaults to "
+    f"`mazu config set council_lead ...` if set, else '{DEFAULT_COUNCIL_LEAD}'.",
 )
 @click.option(
     "--max-cost",
@@ -755,11 +759,16 @@ DEFAULT_COUNCIL_LEAD = "anthropic:claude-opus-4-8"
     "round's cost can land after the limit is reached before members stop; the lead "
     "synthesis call is skipped entirely if the budget is already exhausted.",
 )
-def council(question: str, models: str, lead: str, max_cost: float | None) -> None:
+def council(question: str, models: str | None, lead: str | None, max_cost: float | None) -> None:
     """Ask multiple models the same question (read-only, advisory) and have a lead model
     pick the best answer. Costs one API call per model plus one for the lead — an opt-in,
     higher-cost mode for decisions worth a second (and third) opinion, not the default flow.
     """
+    # Resolved at call time (not as click option defaults) so a config value set after
+    # this process started -- e.g. by Curator's set_council_roster tool -- is picked up
+    # on the next invocation without needing a code change or restart.
+    models = models or list_config().get("council_models") or DEFAULT_COUNCIL_MODELS
+    lead = lead or list_config().get("council_lead") or DEFAULT_COUNCIL_LEAD
     ensure_api_key(lead)  # members that lack a configured key fail individually and are reported, not fatal
     print_banner()
     root = Path.cwd()
@@ -1291,12 +1300,18 @@ def branch_from(checkpoint_id: str, branch_name: str) -> None:
     type=int,
     help="Only include the last N days (default: all time).",
 )
-def usage_cmd(since_days: int | None) -> None:
+@click.option(
+    "--command",
+    "command_filter",
+    default=None,
+    help="Only include calls tagged with this command (e.g. 'curator', 'run', 'chat', 'council').",
+)
+def usage_cmd(since_days: int | None, command_filter: str | None) -> None:
     """Show estimated API spend across every mazu session (all projects, all
     providers) — approximate, based on the same built-in pricing table --max-cost
     uses, not a real billing figure."""
     store = UsageStore(_usage_db_path())
-    summary = store.summary(since_days=since_days)
+    summary = store.summary(since_days=since_days, command=command_filter)
     store.close()
 
     if summary["total_calls"] == 0:
@@ -1304,7 +1319,8 @@ def usage_cmd(since_days: int | None) -> None:
         return
 
     window = f"last {since_days} day(s)" if since_days is not None else "all time"
-    click.echo(f"Estimated spend ({window}): ${summary['total_cost']:.4f} across {summary['total_calls']} calls\n")
+    scope = f" (command={command_filter})" if command_filter else ""
+    click.echo(f"Estimated spend ({window}){scope}: ${summary['total_cost']:.4f} across {summary['total_calls']} calls\n")
     click.echo("By model:")
     for row in summary["by_model"]:
         cost = f"${row['cost']:.4f}" if row["cost"] is not None else "(no pricing data)"
@@ -1623,6 +1639,64 @@ def memory_supersede(old_id: int, new_id: int, use_global: bool) -> None:
     click.echo(f"Memory {old_id} marked as superseded by {new_id}." if ok else f"Failed to supersede {old_id}.")
 
 
+@memory.command("stale")
+@click.option(
+    "--days",
+    default=DEFAULT_STALE_DAYS,
+    show_default=True,
+    type=int,
+    help="Flag active memories older than this with no recent retrieval.",
+)
+@click.option("--global", "use_global", is_flag=True, default=False, help="Check the global store instead of this project's.")
+@click.option(
+    "--auto",
+    is_flag=True,
+    default=False,
+    help="Archive every candidate immediately instead of just listing them. Reversible via "
+    "'mazu memory unarchive' -- never a delete.",
+)
+def memory_stale(days: int, use_global: bool, auto: bool) -> None:
+    """List (or, with --auto, archive) active memories that haven't been retrieved
+    in --days days. Pinned memories and the most-recent 'mistake' entries are
+    never flagged, since they're always injected into context regardless of
+    relevance. Archiving is reversible -- see 'mazu memory unarchive'."""
+    db_path = _global_memory_db_path() if use_global else _memory_db_path(Path.cwd())
+    store = MemoryStore(db_path)
+    candidates = find_stale_candidates(store, min_days=days)
+
+    if not candidates:
+        store.close()
+        click.echo(f"No memories stale for {days}+ days.")
+        return
+
+    if not auto:
+        click.echo(f"{len(candidates)} memor{'y is' if len(candidates) == 1 else 'ies are'} stale ({days}+ days, no recent retrieval):\n")
+        for row in candidates:
+            last_used = row["last_used_at"] or "never"
+            click.echo(f"  [{row['id']:>4}] ({row['category']}) {row['title']} — created {row['created_at'][:10]}, last used {last_used}")
+        click.echo("\n(nothing changed — re-run with --auto to archive these, or 'mazu memory forget <id>' to delete individually)")
+        store.close()
+        return
+
+    summary = apply_archival(store, candidates)
+    store.close()
+    click.echo(f"Archived {len(summary)} stale memor{'y' if len(summary) == 1 else 'ies'} (reversible via 'mazu memory unarchive'):\n")
+    for entry in summary:
+        click.echo(f"  [{entry['id']:>4}] ({entry['category']}) {entry['title']}")
+
+
+@memory.command("unarchive")
+@click.argument("memory_id", type=int)
+@click.option("--global", "use_global", is_flag=True, default=False, help="Unarchive in the global store instead of this project's.")
+def memory_unarchive(memory_id: int, use_global: bool) -> None:
+    """Restore an archived memory to active use."""
+    db_path = _global_memory_db_path() if use_global else _memory_db_path(Path.cwd())
+    store = MemoryStore(db_path)
+    ok = store.unarchive(memory_id)
+    store.close()
+    click.echo(f"Unarchived memory {memory_id}." if ok else f"No memory with id {memory_id}.")
+
+
 @memory.command("stats")
 @click.option("--global", "use_global", is_flag=True, default=False, help="Show stats for the global store instead of this project's.")
 def memory_stats(use_global: bool) -> None:
@@ -1634,7 +1708,7 @@ def memory_stats(use_global: bool) -> None:
 
     click.echo(
         f"Total: {stats['total']} ({stats['active']} active, "
-        f"{stats['superseded']} superseded, {stats['pinned']} pinned)"
+        f"{stats['superseded']} superseded, {stats['archived']} archived, {stats['pinned']} pinned)"
     )
     if stats["by_category"]:
         click.echo("\nBy category:")
@@ -1650,22 +1724,268 @@ def memory_stats(use_global: bool) -> None:
         click.echo(f"Newest: [{stats['newest']['id']}] {stats['newest']['title']} ({stats['newest']['created_at']})")
 
 
+def _curator_db_path(root: Path) -> Path:
+    return _mazu_dir(root) / "curator.db"
+
+
+@main.group()
+def curator() -> None:
+    """Autonomous maintenance of Mazu's own state (memory, skills, history) using a
+    separate, independently-configured API key -- never your main model's key.
+    Fully inert (zero API calls, zero files written) until configured; see
+    `mazu curator setup`."""
+
+
+@curator.command("setup")
+def curator_setup() -> None:
+    """Interactive wizard: choose Curator's provider/model and save its API key,
+    fully independent from your main model's key."""
+    click.echo("Curator uses its OWN, separate API key -- never your main model's key.\n")
+    provider = click.prompt(
+        "Provider for Curator",
+        type=click.Choice(["anthropic", "openai", "deepseek", "gemini", "local"]),
+        default="anthropic",
+    )
+    default_model_name = {"anthropic": "claude-haiku-4-5"}.get(provider, "")
+    model_name = click.prompt("Model name (just the model, not 'provider:model')", default=default_model_name)
+    model = f"{provider}:{model_name}"
+    key = click.prompt(
+        "API key for Curator (leave blank if using a local server)",
+        default="", hide_input=True, show_default=False,
+    )
+
+    set_config_value("curator_model", model)
+    if key:
+        set_config_value("curator_api_key", key)
+    click.echo(f"\nSaved. Curator will use {model}.")
+    click.echo("Try it with: mazu curator run --dry-run --verbose")
+
+
+@curator.command("status")
+def curator_status() -> None:
+    """Show whether Curator is configured/enabled, and each area's last-run
+    watermark. Makes no API call."""
+    if not curator_configured():
+        click.echo("Curator is not configured. Run `mazu curator setup` to get started.")
+        return
+    click.echo(f"Model: {curator_model()}")
+    click.echo(f"Enabled: {curator_enabled()}")
+    root = Path.cwd()
+    db_path = _curator_db_path(root)
+    if not db_path.exists():
+        click.echo("No curator runs yet in this project.")
+        return
+    from mazu.curator.orchestrator import KNOWN_AREAS
+
+    store = CuratorStore(db_path)
+    for area_name in KNOWN_AREAS:
+        watermark = store.get_watermark(area_name)
+        if watermark is None or watermark["last_run_at"] is None:
+            click.echo(f"  {area_name}: never curated")
+        else:
+            click.echo(f"  {area_name}: last curated {watermark['last_run_at']}")
+    store.close()
+
+
+@curator.command("run")
+@click.option("--area", "areas", multiple=True, help="Only curate this area (repeatable). Default: all known areas.")
+@click.option("--full", is_flag=True, default=False, help="Ignore watermarks -- re-check every area regardless of when it last ran.")
+@click.option("--dry-run", is_flag=True, default=False, help="Show what Curator would do without changing anything.")
+@click.option("--max-cost", default=None, type=float, help="Stop once estimated spend reaches this many USD.")
+@click.option("--max-rounds", default=8, show_default=True, type=int, help="Max tool-use rounds per area.")
+@click.option("--verbose", is_flag=True, default=False, help="Print each round's usage and tool calls.")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Emit machine-readable JSON instead of text.")
+def curator_run_cmd(
+    areas: tuple[str, ...], full: bool, dry_run: bool, max_cost: float | None,
+    max_rounds: int, verbose: bool, as_json: bool,
+) -> None:
+    """Run a Curator pass. A complete no-op (zero API calls, zero files written) if
+    Curator isn't configured yet -- see `mazu curator setup`."""
+    root = Path.cwd()
+    summary = run_curator(
+        root, areas=list(areas) or None, full=full, dry_run=dry_run,
+        max_cost=max_cost, max_rounds=max_rounds, verbose=verbose,
+    )
+    if as_json:
+        emit_json(dataclasses.asdict(summary))
+        return
+    if not summary.ran:
+        reasons = {
+            "not_configured": "Curator is not configured. Run `mazu curator setup` first.",
+            "disabled": "Curator is disabled. Run `mazu curator enable` to turn it back on.",
+        }
+        click.echo(reasons.get(summary.reason, summary.reason or "Curator did not run."))
+        return
+    click.echo(f"Curator run {summary.run_id} ({'dry-run' if dry_run else 'applied'}):\n")
+    for area_result in summary.areas:
+        if not area_result.ran:
+            click.echo(f"  {area_result.area}: skipped ({area_result.skipped_reason})")
+            continue
+        click.echo(f"  {area_result.area}: {area_result.log_entries} decision(s), ~${area_result.cost:.4f}")
+    click.echo(f"\nTotal estimated cost: ${summary.total_cost:.4f}")
+    click.echo("See details with: mazu curator log / mazu curator report")
+
+
+@curator.command("log")
+@click.option("--area", default=None, help="Only show entries for this area.")
+@click.option("--since-days", default=None, type=int)
+@click.option("--limit", default=50, show_default=True, type=int)
+@click.option("--json", "as_json", is_flag=True, default=False)
+def curator_log_cmd(area: str | None, since_days: int | None, limit: int, as_json: bool) -> None:
+    """Show Curator's diary -- every decision it made, with its rationale."""
+    root = Path.cwd()
+    db_path = _curator_db_path(root)
+    if not db_path.exists():
+        click.echo("No curator runs yet in this project.")
+        return
+    store = CuratorStore(db_path)
+    rows = store.log_recent(area=area, since_days=since_days, limit=limit)
+    store.close()
+    if as_json:
+        emit_json([row_to_dict(r) for r in rows])
+        return
+    if not rows:
+        click.echo("No log entries.")
+        return
+    for r in rows:
+        applied = "" if r["applied"] else " (dry-run)"
+        target = f" {r['target_type']}:{r['target_id']}" if r["target_type"] else ""
+        click.echo(f"[{r['created_at'][:19]}] ({r['area']}) {r['action']}{target}{applied}\n    {r['rationale']}")
+        if r["reversal_hint"]:
+            click.echo(f"    reverse: {r['reversal_hint']}")
+
+
+@curator.command("report")
+@click.option("--run-id", default=None, help="Show this specific run instead of the most recent.")
+@click.option("--json", "as_json", is_flag=True, default=False)
+def curator_report_cmd(run_id: str | None, as_json: bool) -> None:
+    """Show a summary of one Curator run."""
+    root = Path.cwd()
+    db_path = _curator_db_path(root)
+    if not db_path.exists():
+        click.echo("No curator runs yet in this project.")
+        return
+    store = CuratorStore(db_path)
+    run = store.last_run(run_id)
+    if run is None:
+        store.close()
+        click.echo("No matching curator run.")
+        return
+    entries = store.log_for_run(run["id"])
+    store.close()
+    if as_json:
+        emit_json({"run": row_to_dict(run), "entries": [row_to_dict(e) for e in entries]})
+        return
+    click.echo(f"Run {run['id']} ({run['status']}) -- areas: {run['areas']}, dry_run={bool(run['dry_run'])}")
+    click.echo(f"Started {run['started_at']}, ended {run['ended_at']}, cost ~${run['total_cost_usd'] or 0:.4f}\n")
+    for e in entries:
+        click.echo(f"  ({e['area']}) {e['action']}: {e['rationale']}")
+
+
+@curator.command("enable")
+def curator_enable_cmd() -> None:
+    """Turn Curator back on after `mazu curator disable`. Configuration (model/key)
+    is kept across enable/disable."""
+    set_config_value("curator_enabled", "true")
+    click.echo("Curator enabled.")
+
+
+@curator.command("disable")
+def curator_disable_cmd() -> None:
+    """Turn Curator off without discarding its configured model/key -- `mazu
+    curator run` becomes a no-op until re-enabled."""
+    set_config_value("curator_enabled", "false")
+    click.echo("Curator disabled. Configuration (model/key) is kept -- re-enable with `mazu curator enable`.")
+
+
+# Actions with a direct, safe programmatic reversal -- undo dispatches to the
+# actual store method for these (never by re-parsing/shelling out to the printed
+# reversal_hint text, which is human-facing guidance, not a command to execute).
+# Anything not listed here (edit_memory, add_memory, supersede_memory/skill,
+# write_skill, record_conflict/resolve_conflict) has no safe generic undo --
+# `mazu curator undo` just prints the logged reversal_hint/rationale for those,
+# for a human to act on manually.
+_CURATOR_UNDO_MEMORY_ACTIONS = {
+    "archive_memory": "unarchive", "unarchive_memory": "archive",
+    "pin_memory": "unpin", "unpin_memory": "pin",
+}
+_CURATOR_UNDO_SKILL_ACTIONS = {
+    "archive_skill": "unarchive", "unarchive_skill": "archive",
+}
+
+
+@curator.command("undo")
+@click.argument("log_id", type=int)
+def curator_undo_cmd(log_id: int) -> None:
+    """Reverse one Curator diary entry by its log id (see `mazu curator log`).
+    Directly reverses memory/skill archive/pin actions; for anything else, prints
+    the logged reversal guidance for you to apply yourself."""
+    root = Path.cwd()
+    db_path = _curator_db_path(root)
+    if not db_path.exists():
+        click.echo("No curator runs yet in this project.")
+        return
+    store = CuratorStore(db_path)
+    row = store.conn.execute("SELECT * FROM curator_log WHERE id = ?", (log_id,)).fetchone()
+    store.close()
+    if row is None:
+        click.echo(f"No curator log entry with id {log_id}.")
+        return
+
+    action = row["action"]
+    if action in _CURATOR_UNDO_MEMORY_ACTIONS:
+        memory_store = MemoryStore(_memory_db_path(root))
+        method = getattr(memory_store, _CURATOR_UNDO_MEMORY_ACTIONS[action])
+        ok = method(int(row["target_id"]))
+        memory_store.close()
+        click.echo(
+            f"{'Reversed' if ok else 'Could not reverse (memory not found)'}: {action} on memory {row['target_id']}."
+        )
+        return
+    if action in _CURATOR_UNDO_SKILL_ACTIONS:
+        manager = SkillManager(root)
+        method = getattr(manager, _CURATOR_UNDO_SKILL_ACTIONS[action])
+        ok = method(row["target_id"])
+        click.echo(
+            f"{'Reversed' if ok else 'Could not reverse (skill not found)'}: {action} on skill '{row['target_id']}'."
+        )
+        return
+
+    if row["reversal_hint"]:
+        click.echo(f"No automatic undo for '{action}'. Logged guidance:\n  {row['reversal_hint']}")
+    else:
+        click.echo(f"No automatic undo for '{action}', and no reversal guidance was logged for this entry.")
+
+
 @main.group()
 def skills() -> None:
     """Inspect and manage the local skill library."""
 
 
 @skills.command("list")
-def skills_list() -> None:
+@click.option("--archived", is_flag=True, default=False, help="Show archived skills instead of active ones.")
+def skills_list(archived: bool) -> None:
     """List saved skills for the current project."""
     root = Path.cwd()
     manager = SkillManager(root)
-    metas = manager.list()
+    metas = manager.list(include_archived=archived)
+    if archived:
+        metas = [m for m in metas if m.get("archived")]
     if not metas:
-        click.echo("No skills saved yet.")
+        click.echo("No archived skills." if archived else "No skills saved yet.")
         return
     for m in metas:
         click.echo(f"- {m['name']}: {m['description']} (used {m.get('usage_count', 0)}x)")
+
+
+@skills.command("unarchive")
+@click.argument("name")
+def skills_unarchive(name: str) -> None:
+    """Restore an archived skill to active use."""
+    root = Path.cwd()
+    manager = SkillManager(root)
+    ok = manager.unarchive(name)
+    click.echo(f"Unarchived skill '{name}'." if ok else f"No skill named '{name}'.")
 
 
 @skills.command("forget")

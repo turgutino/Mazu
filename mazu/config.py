@@ -26,14 +26,31 @@ _PROVIDER_KEY_ENV_VARS = {
     "deepseek_api_key": "DEEPSEEK_API_KEY",
     "gemini_api_key": "GEMINI_API_KEY",
 }
+# Curator's own model/key/enablement -- deliberately NOT part of _PROVIDER_KEY_ENV_VARS
+# and never touched by load_config()'s env-injection loop below. That loop's whole
+# purpose is auto-injecting the *shared* provider keys the main model resolution
+# consults (ensure_api_key()/default_model()); curator_api_key must never be able to
+# leak into that shared environ pool, and the main key must never be picked up by
+# Curator -- see mazu/curator/config.py, which reads these independently.
+# curator_provider is deliberately omitted: curator_model is "provider:model" and the
+# provider is derived from its prefix (same as every other model string in Mazu) --
+# a separate curator_provider key would be a second source of truth that can silently
+# disagree with curator_model's own prefix.
+_CURATOR_CONFIG_KEYS = {"curator_api_key", "curator_model", "curator_base_url", "curator_enabled"}
+# A persisted default roster for `mazu council` -- previously pure hardcoded CLI
+# defaults (DEFAULT_COUNCIL_MODELS/DEFAULT_COUNCIL_LEAD in cli.py), which stay as
+# the fallback when these are unset. council_models is a comma-joined model list,
+# matching how --models is already parsed on the command line.
+_COUNCIL_CONFIG_KEYS = {"council_models", "council_lead"}
 KNOWN_CONFIG_KEYS = {
-    "default_model", "api_key", "local_base_url", "router_suggestions", *_PROVIDER_KEY_ENV_VARS
+    "default_model", "api_key", "local_base_url", "router_suggestions",
+    *_PROVIDER_KEY_ENV_VARS, *_CURATOR_CONFIG_KEYS, *_COUNCIL_CONFIG_KEYS,
 }
 # Keys whose stored value is a secret -- `mazu config list` masks these, never
 # printing the real value. local_base_url is deliberately excluded: it's a URL, not
 # a secret, and showing it in plain text is what makes `mazu config list` useful for
 # confirming which local server Mazu is actually pointed at.
-_SECRET_CONFIG_KEYS = {"api_key", *_PROVIDER_KEY_ENV_VARS}
+_SECRET_CONFIG_KEYS = {"api_key", *_PROVIDER_KEY_ENV_VARS, "curator_api_key"}
 
 _LOCAL_BASE_URL_DEFAULT = "http://localhost:1234/v1"  # LM Studio's default port
 

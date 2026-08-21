@@ -229,6 +229,44 @@ def test_migration_adds_retrieval_columns_to_pre_existing_db(tmp_path: Path):
     store.close()
 
 
+def test_migration_adds_archived_column_to_pre_existing_db(tmp_path: Path):
+    import sqlite3
+
+    db_path = tmp_path / "old_memory.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE memories (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at      TEXT NOT NULL,
+            updated_at      TEXT NOT NULL,
+            category        TEXT NOT NULL,
+            title           TEXT NOT NULL,
+            body            TEXT NOT NULL,
+            tags            TEXT,
+            source          TEXT NOT NULL,
+            session_id      TEXT,
+            relevance_score REAL NOT NULL DEFAULT 1.0,
+            superseded_by   INTEGER REFERENCES memories(id),
+            pinned          INTEGER NOT NULL DEFAULT 0,
+            embedding       TEXT,
+            retrieval_count INTEGER NOT NULL DEFAULT 0,
+            last_used_at    TEXT
+        );
+        INSERT INTO memories (created_at, updated_at, category, title, body, source)
+        VALUES ('2024-01-01', '2024-01-01', 'fact', 'Pre-existing memory', 'body text', 'explicit');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    store = MemoryStore(db_path)
+    rows = store.all_active()
+    assert len(rows) == 1  # not archived by default -- a pre-existing row must stay visible
+    assert rows[0]["archived"] == 0
+    store.close()
+
+
 # ---------------------------------------------------------------------------
 # pin / unpin / edit / get
 # ---------------------------------------------------------------------------
@@ -250,8 +288,57 @@ def test_pin_missing_id_returns_false(store: MemoryStore):
     assert store.pin(9999) is False
 
 
+def test_archive_excludes_from_all_active_search_and_pinned(store: MemoryStore):
+    memory_id = store.add(category="fact", title="A", body="a")
+    assert store.archive(memory_id) is True
+
+    assert memory_id not in {r["id"] for r in store.all_active()}
+    assert memory_id not in {r["id"] for r in store.search()}
+    assert store.get(memory_id)["archived"] == 1
+
+
+def test_unarchive_restores_visibility(store: MemoryStore):
+    memory_id = store.add(category="fact", title="A", body="a")
+    store.archive(memory_id)
+    assert store.unarchive(memory_id) is True
+
+    assert memory_id in {r["id"] for r in store.all_active()}
+    assert store.get(memory_id)["archived"] == 0
+
+
+def test_archive_missing_id_returns_false(store: MemoryStore):
+    assert store.archive(9999) is False
+
+
+def test_archived_pinned_memory_is_excluded_from_pinned_list(store: MemoryStore):
+    # A row that's both pinned and archived shouldn't happen via normal app flow
+    # (find_stale_candidates() already skips pinned rows), but pinned() itself
+    # must still honor archived=1 if it ever does.
+    memory_id = store.add(category="fact", title="A", body="a", pinned=True)
+    store.archive(memory_id)
+    assert memory_id not in {r["id"] for r in store.pinned()}
+
+
 def test_get_missing_id_returns_none(store: MemoryStore):
     assert store.get(9999) is None
+
+
+def test_list_archived_returns_only_archived_rows(store: MemoryStore):
+    active_id = store.add(category="fact", title="Active", body="a")
+    archived_id = store.add(category="fact", title="Archived", body="b")
+    store.archive(archived_id)
+
+    archived_ids = {r["id"] for r in store.list_archived()}
+    assert archived_ids == {archived_id}
+    assert active_id not in archived_ids
+
+
+def test_list_archived_excludes_superseded(store: MemoryStore):
+    old_id = store.add(category="fact", title="Old", body="a")
+    new_id = store.add(category="fact", title="New", body="b")
+    store.supersede(old_id, new_id)
+
+    assert store.list_archived() == []
 
 
 def test_edit_updates_title_and_body(store: MemoryStore):
@@ -340,8 +427,23 @@ def test_stats_counts_superseded_separately_from_active(store: MemoryStore):
     assert stats["total"] == 2
     assert stats["active"] == 1
     assert stats["superseded"] == 1
+    assert stats["archived"] == 0
     # Superseded rows are excluded from by_category counts (same rule as all_active()).
     assert stats["by_category"] == {"decision": 1}
+
+
+def test_stats_counts_archived_separately_from_superseded(store: MemoryStore):
+    kept_id = store.add(category="fact", title="Kept", body="x")
+    archived_id = store.add(category="fact", title="Archived", body="y")
+    store.archive(archived_id)
+
+    stats = store.stats()
+    assert stats["total"] == 2
+    assert stats["active"] == 1
+    assert stats["superseded"] == 0
+    assert stats["archived"] == 1
+    assert stats["by_category"] == {"fact": 1}
+    assert {kept_id} == {stats["oldest"]["id"]}
 
 
 def test_stats_oldest_and_newest(store: MemoryStore):

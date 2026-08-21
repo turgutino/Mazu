@@ -38,6 +38,68 @@ def test_session_actions_orders_chronologically(store: ActionLogStore):
     assert [a["output_summary"] for a in actions] == ["first", "second"]
 
 
+# ---------------------------------------------------------------------------
+# skill_run_outcomes -- Curator's ground truth for "is this skill actually working"
+# ---------------------------------------------------------------------------
+
+
+def test_skill_run_outcomes_counts_ok_and_error_per_skill(store: ActionLogStore):
+    store.log("s1", "chat", "run_skill", '{"name": "parse_log", "args": {}}', "ok", "out", None)
+    store.log("s1", "chat", "run_skill", '{"name": "parse_log", "args": {}}', "ok", "out", None)
+    store.log("s1", "chat", "run_skill", '{"name": "parse_log", "args": {}}', "error", "boom", None)
+    store.log("s1", "chat", "run_skill", '{"name": "other_skill", "args": {}}', "ok", "out", None)
+
+    outcomes = store.skill_run_outcomes()
+
+    assert outcomes["parse_log"] == {"ok": 2, "error": 1}
+    assert outcomes["other_skill"] == {"ok": 1, "error": 0}
+
+
+def test_skill_run_outcomes_ignores_non_run_skill_actions(store: ActionLogStore):
+    store.log("s1", "chat", "read_file", '{"path": "a.py"}', "ok", "out", None)
+    assert store.skill_run_outcomes() == {}
+
+
+def test_skill_run_outcomes_recovers_name_from_truncated_json_via_regex_fallback():
+    """tool_input is truncated at TOOL_INPUT_MAX_CHARS before storage -- if 'name'
+    itself is short (the common case, since it serializes first), the JSON is
+    still technically invalid once truncated (missing closing braces), so the
+    regex fallback -- not json.loads -- is what actually recovers it here."""
+    from mazu.action_log.store import _truncate
+
+    huge_args = "x" * 2000
+    raw = f'{{"name": "my_skill", "args": {{"data": "{huge_args}"}}}}'
+    truncated = _truncate(raw, TOOL_INPUT_MAX_CHARS)
+    assert not truncated.rstrip().endswith("}")  # confirm it's genuinely truncated/invalid JSON
+
+    import tempfile
+    from pathlib import Path as _Path
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store = ActionLogStore(_Path(tmp) / "action_log.db")
+        store.log("s1", "chat", "run_skill", truncated, "ok", "out", None)
+        outcomes = store.skill_run_outcomes()
+        store.close()
+
+    assert outcomes["my_skill"] == {"ok": 1, "error": 0}
+
+
+def test_skill_run_outcomes_buckets_unrecoverable_names_separately(store: ActionLogStore):
+    store.log("s1", "chat", "run_skill", "not json at all and no name key here", "ok", "out", None)
+    outcomes = store.skill_run_outcomes()
+    assert outcomes["(unparseable)"] == {"ok": 1, "error": 0}
+
+
+def test_skill_run_outcomes_respects_since_days(store: ActionLogStore):
+    store.log("s1", "chat", "run_skill", '{"name": "old_skill"}', "ok", "out", None)
+    store.conn.execute("UPDATE actions SET created_at = datetime('now', '-40 days')")
+    store.conn.commit()
+    store.log("s1", "chat", "run_skill", '{"name": "old_skill"}', "error", "out", None)
+
+    outcomes = store.skill_run_outcomes(since_days=7)
+    assert outcomes["old_skill"] == {"ok": 0, "error": 1}
+
+
 def test_session_actions_filters_by_session(store: ActionLogStore):
     store.log("s1", "chat", "read_file", "{}", "ok", "s1 action", None)
     store.log("s2", "run", "read_file", "{}", "ok", "s2 action", None)

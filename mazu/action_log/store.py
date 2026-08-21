@@ -1,7 +1,10 @@
 import json
+import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
+
+_SKILL_NAME_RE = re.compile(r'"name"\s*:\s*"([^"]+)"')
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS actions (
@@ -106,6 +109,47 @@ class ActionLogStore:
             "SELECT * FROM actions WHERE session_id = ? ORDER BY created_at ASC, id ASC",
             (session_id,),
         ).fetchall()
+
+    def skill_run_outcomes(self, since_days: int | None = None) -> dict[str, dict[str, int]]:
+        """Per-skill-name {"ok": N, "error": N} counts derived from every logged
+        run_skill call -- real, per-invocation ground truth (SkillManager.run()'s
+        actual subprocess exit code, already recorded here by record_action()), no
+        separate outcome-tracking mechanism needed. tool_input is JSON-truncated
+        at TOOL_INPUT_MAX_CHARS, but "name" serializes first (see
+        skill_tools.make_skill_tools's run_skill input dict), so it survives
+        truncation in the overwhelming majority of cases; the regex fallback below
+        recovers the rest. A skill name that can't be recovered by either method
+        buckets under "(unparseable)" rather than being silently dropped, so a
+        caller can see if this data source degraded instead of trusting an
+        under-count.
+        """
+        conditions = ["tool_name = 'run_skill'"]
+        params: list = []
+        if since_days is not None:
+            conditions.append("created_at >= datetime('now', ?)")
+            params.append(f"-{since_days} days")
+        where = " AND ".join(conditions)
+        rows = self.conn.execute(
+            f"SELECT tool_input, outcome FROM actions WHERE {where}", params
+        ).fetchall()
+
+        results: dict[str, dict[str, int]] = {}
+        for row in rows:
+            name = self._parse_skill_name(row["tool_input"]) or "(unparseable)"
+            bucket = results.setdefault(name, {"ok": 0, "error": 0})
+            bucket["ok" if row["outcome"] == "ok" else "error"] += 1
+        return results
+
+    @staticmethod
+    def _parse_skill_name(tool_input_json: str) -> str | None:
+        try:
+            parsed = json.loads(tool_input_json)
+            if isinstance(parsed, dict) and isinstance(parsed.get("name"), str):
+                return parsed["name"]
+        except (json.JSONDecodeError, TypeError):
+            pass
+        match = _SKILL_NAME_RE.search(tool_input_json)
+        return match.group(1) if match else None
 
     def close(self) -> None:
         self.conn.close()

@@ -633,6 +633,117 @@ def test_memory_supersede_unknown_new_id_reports_cleanly(tmp_path, monkeypatch):
     assert "No memory with id 9999" in result.output
 
 
+def _backdate(store, memory_id, days_ago, also_last_used=False):
+    from datetime import datetime, timedelta, timezone
+
+    ts = (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat()
+    if also_last_used:
+        store.conn.execute("UPDATE memories SET created_at = ?, last_used_at = ? WHERE id = ?", (ts, ts, memory_id))
+    else:
+        store.conn.execute("UPDATE memories SET created_at = ? WHERE id = ?", (ts, memory_id))
+    store.conn.commit()
+
+
+def test_memory_stale_lists_candidates_without_changing_anything(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = MemoryStore(_memory_db_path(tmp_path))
+    stale_id = store.add(category="fact", title="Old fact", body="body")
+    _backdate(store, stale_id, days_ago=40)
+    fresh_id = store.add(category="fact", title="Fresh fact", body="body")
+    store.close()
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["memory", "stale"])
+
+    assert result.exit_code == 0, result.output
+    assert "Old fact" in result.output
+    assert "Fresh fact" not in result.output
+    assert "nothing changed" in result.output
+
+    store = MemoryStore(_memory_db_path(tmp_path))
+    active_ids = {row["id"] for row in store.all_active()}
+    assert stale_id in active_ids
+    assert fresh_id in active_ids
+    store.close()
+
+
+def test_memory_stale_no_candidates_reports_cleanly(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = MemoryStore(_memory_db_path(tmp_path))
+    store.add(category="fact", title="Fresh fact", body="body")
+    store.close()
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["memory", "stale"])
+
+    assert result.exit_code == 0, result.output
+    assert "No memories stale" in result.output
+
+
+def test_memory_stale_auto_archives_candidates(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = MemoryStore(_memory_db_path(tmp_path))
+    stale_id = store.add(category="fact", title="Old fact", body="body")
+    _backdate(store, stale_id, days_ago=40)
+    store.close()
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["memory", "stale", "--auto"])
+
+    assert result.exit_code == 0, result.output
+    assert "Archived 1" in result.output
+    assert "Old fact" in result.output
+
+    store = MemoryStore(_memory_db_path(tmp_path))
+    active_ids = {row["id"] for row in store.all_active()}
+    assert stale_id not in active_ids
+    stats = store.stats()
+    assert stats["archived"] == 1
+    store.close()
+
+
+def test_memory_stale_respects_days_option(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = MemoryStore(_memory_db_path(tmp_path))
+    memory_id = store.add(category="fact", title="Ten days old", body="body")
+    _backdate(store, memory_id, days_ago=10)
+    store.close()
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["memory", "stale", "--days", "30"])
+    assert "No memories stale" in result.output
+
+    result = runner.invoke(main, ["memory", "stale", "--days", "5"])
+    assert "Ten days old" in result.output
+
+
+def test_memory_unarchive_restores_visibility(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = MemoryStore(_memory_db_path(tmp_path))
+    memory_id = store.add(category="fact", title="Archived fact", body="body")
+    store.archive(memory_id)
+    store.close()
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["memory", "unarchive", str(memory_id)])
+
+    assert result.exit_code == 0, result.output
+    assert f"Unarchived memory {memory_id}" in result.output
+
+    store = MemoryStore(_memory_db_path(tmp_path))
+    active_ids = {row["id"] for row in store.all_active()}
+    assert memory_id in active_ids
+    store.close()
+
+
+def test_memory_unarchive_unknown_id_reports_cleanly(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(main, ["memory", "unarchive", "9999"])
+    assert result.exit_code == 0
+    assert "No memory with id 9999" in result.output
+
+
 def test_memory_stats_empty_project(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     runner = CliRunner()

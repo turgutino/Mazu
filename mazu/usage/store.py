@@ -69,7 +69,12 @@ class UsageStore:
         )
         self.conn.commit()
 
-    def summary(self, since_days: int | None = None, session_id: str | None = None) -> dict:
+    def summary(
+        self,
+        since_days: int | None = None,
+        session_id: str | None = None,
+        command: str | None = None,
+    ) -> dict:
         """Aggregates spend grouped by (provider, model). `estimated_cost_usd` can be
         NULL for calls against a model with no pricing entry -- those still count
         toward `total_calls` but contribute 0 to `total_cost`, and are flagged via
@@ -80,6 +85,11 @@ class UsageStore:
         (usage_log.session_id is already populated on every row `run_autonomous`
         writes) -- this is what makes a per-run/per-branch estimated cost queryable
         for `mazu checkpoint compare-branches` without a separate cost-tracking table.
+
+        `command`, when given, scopes to one `command` tag (e.g. "curator") -- the
+        column already exists and is already populated ("run"/"chat"/"council"/...),
+        this just adds the missing filter so a caller can isolate one kind of spend
+        (e.g. `mazu usage --command curator`) from the rest of `mazu usage`.
         """
         conditions = []
         params: list = []
@@ -89,6 +99,9 @@ class UsageStore:
         if session_id is not None:
             conditions.append("session_id = ?")
             params.append(session_id)
+        if command is not None:
+            conditions.append("command = ?")
+            params.append(command)
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
         rows = self.conn.execute(

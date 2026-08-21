@@ -113,6 +113,47 @@ def test_get_default_model_returns_configured_value():
     assert get_default_model() == "deepseek:deepseek-chat"
 
 
+def test_curator_api_key_is_settable_and_masked():
+    from mazu.config import _SECRET_CONFIG_KEYS
+
+    set_config_value("curator_api_key", "sk-curator-secret")
+    assert list_config()["curator_api_key"] == "sk-curator-secret"
+    assert "curator_api_key" in _SECRET_CONFIG_KEYS
+
+
+def test_curator_model_and_base_url_and_enabled_are_settable():
+    set_config_value("curator_model", "deepseek:deepseek-chat")
+    set_config_value("curator_base_url", "http://localhost:1234/v1")
+    set_config_value("curator_enabled", "false")
+    values = list_config()
+    assert values["curator_model"] == "deepseek:deepseek-chat"
+    assert values["curator_base_url"] == "http://localhost:1234/v1"
+    assert values["curator_enabled"] == "false"
+
+
+def test_curator_provider_is_not_a_known_key():
+    """Deliberately omitted -- curator_model's own 'provider:model' prefix is the
+    single source of truth for which provider Curator uses; a separate
+    curator_provider key would be a second source of truth that could disagree."""
+    with pytest.raises(ValueError, match="Unknown config key"):
+        set_config_value("curator_provider", "anthropic")
+
+
+def test_load_config_never_injects_curator_api_key_into_any_env_var(monkeypatch):
+    """The whole point of curator_api_key living outside _PROVIDER_KEY_ENV_VARS:
+    load_config()'s env-injection loop (which every real ensure_api_key()/
+    default_model() call path runs through) must never touch it or any of the
+    main provider env vars because of it."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("MAZU_CURATOR_API_KEY", raising=False)
+    set_config_value("curator_api_key", "sk-curator-secret")
+
+    load_config()
+
+    assert os.environ.get("ANTHROPIC_API_KEY") is None
+    assert os.environ.get("MAZU_CURATOR_API_KEY") is None
+
+
 def test_load_config_malformed_toml_warns_and_returns_empty(tmp_path, capsys):
     config_path = tmp_path / "config.toml"
     config_path.write_text("this is not valid toml [[[", encoding="utf-8")
