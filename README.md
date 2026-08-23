@@ -4,7 +4,7 @@
 
 **Mazu is a local memory and checkpoint layer for coding agents.**
 
-Alpha, but usable — the core loop (memory, checkpoints, rollback) has been exercised through live testing against real Anthropic/OpenAI/DeepSeek API keys and a 650+ test suite (see [Status & roadmap](#status--roadmap) for the honest gaps list, not just the wins).
+Alpha, but usable — the core loop (memory, checkpoints, rollback) has been exercised through live testing against real Anthropic/OpenAI/DeepSeek API keys and a 970+ test suite (see [Status & roadmap](#status--roadmap) for the honest gaps list, not just the wins).
 
 ```
   ███╗   ███╗
@@ -275,6 +275,20 @@ pip install "mazu[openai]"     # if not already installed
 
 With that set, new memories get an embedding (OpenAI's `text-embedding-3-small`) stored alongside them at write time, and retrieval blends BM25 with cosine similarity (50/50) instead of ranking on keywords alone. Memories written before you turned this on simply don't have a stored embedding and fall back to their BM25 contribution — nothing breaks, nothing needs to be backfilled. Requires an OpenAI key specifically (for the embedding call) regardless of which provider you use for the main conversation.
 
+#### Belief-shadow observation (experimental, observation-only — nothing is corrected automatically yet)
+
+Mazu's memory is good at remembering, but doesn't yet know when something it remembers is no longer true — a real gap on the way to genuinely human-like project memory. The first step toward closing it is pure observation, not correction: two SHADOW-MODE logs, written locally to `.mazu/belief_shadow.db`, that record real memory decisions without ever acting on them.
+
+- **Auto-extraction shadow log** — when the end-of-session extraction pass finds a new memory that's lexically close to (but not an exact/fuzzy duplicate of) something already stored, a cheap classifier judges the relationship (unrelated, duplicate, refinement, replacement, contradiction, or temporary state) and logs what it *would* do — insert, skip, or supersede — without ever actually superseding anything. Bounded to at most 5 classifier calls per session/compaction event, and only runs at all when a genuinely similar memory exists (the common case of a new, unrelated fact costs nothing extra).
+- **Explicit-action shadow log** — every real `remember`/`supersede` tool call the agent makes on its own is logged too, at zero extra API cost (a supersede's relationship is already known — the agent told us by choosing to supersede — so no classifier call is needed for it).
+
+```bash
+mazu memory-belief stats     # how many real decisions have been observed so far, and their distribution
+mazu memory-belief review    # human-readable detail on recent observed decisions, with filters
+```
+
+This exists purely to gather real evidence before any automatic memory correction is ever considered — see [Known gaps](#status--roadmap) for exactly what's still missing before that's justified.
+
 ### Terminal UI
 
 ```bash
@@ -346,6 +360,19 @@ mazu router stats --json
 ```
 
 This never changes which model actually runs — `--model`/no-`--model` resolution is completely untouched by the router; the suggestion is only ever printed, never fed back into the run itself. Task-type classification is a local, zero-cost keyword heuristic (no extra API call on every plain run); suggestions only appear once at least 3 matching data points exist, and are scoped to the current project only — no cross-codebase inference. Turn it off with `mazu config set router_suggestions false`.
+
+### Curator — autonomous maintenance of Mazu's own state
+
+```bash
+mazu curator setup     # pick Curator's own model + API key, separate from your main one
+mazu curator run       # one maintenance pass, across whichever areas have real work pending
+mazu curator run --area memory --dry-run   # preview only, nothing applied
+mazu curator status                        # configured/enabled, each area's last run + eligibility
+mazu curator log                           # every real decision made, with its rationale
+mazu curator undo <log_id>                 # reverse one specific diary entry
+```
+
+An opt-in, fully autonomous background process that reviews and tidies up Mazu's own accumulated state on a project — memory (archiving stale/duplicate entries, superseding outdated decisions), skills (retiring or rewriting ones with a poor real success history), housekeeping (config, abandoned branches, spend patterns), and conflicts (finding and resolving genuinely contradictory memories) — using its **own, separate API key**, never your main model's. Completely inert (zero API calls, zero files touched) until `mazu curator setup`. Every real pass first does a free, local eligibility check per area and only spends money where there's an actual signal (real duplicate/stale counts, a real failure rate) worth acting on — running it again moments later typically costs nothing. Every mutating action is reversible (archive/supersede/edit, never a real delete) and logged with a required rationale via `mazu curator log`.
 
 ### Cost & usage tracking
 
@@ -451,14 +478,15 @@ The module map, the provider adapter seam, and how memory/checkpoints/skills fit
 
 ## Status & roadmap
 
-Milestones M1–M4 (bare tool loop, persistent memory, checkpoint/rollback, supervised autonomy) all have a working implementation, plus multi-provider support (five providers, including a fully local, no-API-key option), council mode, explore mode (parallel branch exploration with automatic test-based ranking), real-time streaming (`mazu chat`), context compaction (`mazu run`), dry-run mode, shell allowlists, a persistent agent action log (`mazu log`), resumable runs (`mazu run --resume`), branching checkpoints (`mazu run --from-checkpoint`, `mazu checkpoint compare-branches`), machine-readable `--json` output on the read-oriented commands, a model capability table (`mazu models`), persistent settings (`mazu config`), guided onboarding (`mazu setup`, `mazu doctor --fix`), a terminal UI (`mazu ui`), a separate [`mazu-web`](https://github.com/turgutino/mazu-web) browser companion with full command parity, and optional semantic memory search. This has been exercised through live testing against real Anthropic, OpenAI, and DeepSeek API keys (Gemini live-verified for authentication; full generation blocked on that key's zero free-tier quota — see known gaps), plus a real local model served through LM Studio, plus a test suite (650+ tests, zero API cost by default) running on every push via GitHub Actions across Python 3.11–3.13 on Linux/Windows/macOS. A [VS Code/Cursor extension design document](docs/vscode-extension-design.md) exists for a possible future editor integration — design only, not implemented; [CHANGELOG.md](CHANGELOG.md) has the version-by-version history.
+Milestones M1–M4 (bare tool loop, persistent memory, checkpoint/rollback, supervised autonomy) all have a working implementation, plus multi-provider support (five providers, including a fully local, no-API-key option), council mode, explore mode (parallel branch exploration with automatic test-based ranking, plus a learning router that suggests — never auto-applies — a model based on your own project's past explore results), real-time streaming (`mazu chat`), context compaction (`mazu run`/`mazu chat`, including mid-session on hitting a real context-length error), dry-run mode, shell allowlists, a persistent agent action log (`mazu log`), resumable runs (`mazu run --resume`), branching checkpoints (`mazu run --from-checkpoint`, `mazu checkpoint compare-branches`), machine-readable `--json` output on the read-oriented commands, a model capability table (`mazu models`), persistent settings (`mazu config`), guided onboarding (`mazu setup`, `mazu doctor --fix`), a terminal UI (`mazu ui`), a separate [`mazu-web`](https://github.com/turgutino/mazu-web) browser companion with full command parity, optional semantic memory search, an opt-in autonomous maintenance process (`mazu curator`) for Mazu's own accumulated state, and an experimental, observation-only belief-shadow system (`mazu memory-belief`) laying the groundwork for eventually detecting outdated/contradictory memories automatically. This has been exercised through real, live head-to-head testing across Anthropic, OpenAI, and DeepSeek (full real generations on all three, not just authentication checks) on a range of real coding tasks — bugfixes, refactors, feature work, diagnosis — with real cost/quality/reliability data collected via `mazu explore`, plus a real local model served through LM Studio. Gemini is implemented and was previously live-verified for authentication, but hasn't been exercised in this latest round of real testing (no working Gemini credentials were available) — see known gaps. All of the above runs on every push via GitHub Actions across Python 3.11–3.13 on Linux/Windows/macOS, on a test suite of 970+ tests (zero API cost by default). A [VS Code/Cursor extension design document](docs/vscode-extension-design.md) exists for a possible future editor integration — design only, not implemented; [CHANGELOG.md](CHANGELOG.md) has the version-by-version history.
 
 **Known gaps, honestly listed:**
+- **Automatic memory correction doesn't exist yet, by design.** `mazu memory-belief` observes real memory decisions (both the agent's own explicit `remember`/`supersede` calls and a cheap classifier's judgment on auto-extracted near-duplicates) and logs what it *would* do, but nothing is ever applied automatically. As of this writing, real observed decisions across actual usage are still well below the sample size (~20-30) needed to responsibly evaluate whether an automatic version would be trustworthy — this is deliberately staying in evidence-gathering mode until that changes.
 - Semantic search's 50/50 BM25/embedding blend weight is a fixed constant, not tuned against real usage data.
 - `mazu rollback` itself is still linear (`git reset --hard` in place) — but `mazu run --from-checkpoint` now forks a new branch non-destructively and `mazu checkpoint compare-branches` diffs two runs' outcomes side by side, so "try a different approach from here without losing the original" no longer requires manual git surgery. There's still no tree/graph *view* of branch history (the terminal UI's checkpoint table is a flat, branch-annotated list, not a graph) and no merge/rebase concept between branches — this is diverge-and-compare, not reconcile.
 - Streaming is `mazu chat`-only for now; Gemini doesn't stream at all yet (falls back to a complete response, correct but not incremental — see `mazu models`). Deliberately deferred: the `google-genai` SDK's docs and source don't say whether function-call parts arrive fragmented, whole, or only in the final chunk during a stream, and guessing wrong risks silently mishandling tool calls. Needs a live Gemini key with real quota to verify before implementing.
 - Live testing so far has been on Windows; CI runs the test suite on Linux/macOS too, but a real provider hasn't been exercised live on those platforms yet.
-- Gemini is live-verified for authentication and error classification, but not yet for a full successful generation (the test key had zero free-tier quota).
+- Gemini remains implemented but not currently live-tested in real multi-provider comparisons — no working Gemini API key has been available for this round of testing; revisit once one is.
 - `mazu memory consolidate` uses a "keep the newest" heuristic, which isn't always the most complete entry — check `--dry-run` output before applying.
 
 The full build sequence — what's next, in what order, and what's deliberately not planned yet — is in [ROADMAP.md](ROADMAP.md).
