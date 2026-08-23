@@ -1,12 +1,31 @@
 import os
 from typing import Callable
 
+from mazu.llm.capabilities import DEFAULT_ANTHROPIC_MAX_TOKENS, MAX_OUTPUT_TOKENS
 from mazu.llm.error_mapping import classify_sdk_error
 from mazu.llm.errors import MazuAuthError
 from mazu.llm.providers.base import Provider
 from mazu.llm.types import AgentResponse
 
-MAX_TOKENS = 4096
+# Structured single-field extraction (run_forced_tool, used only by
+# mazu/memory/extraction.py) never needs a long free-form output -- kept as its
+# own small, fixed constant, independent of the per-model table below, which
+# exists specifically for ordinary agentic turns (run_turn/run_turn_stream) that
+# can legitimately need a long response (a big diff, a long explanation).
+FORCED_TOOL_MAX_TOKENS = 1024
+
+
+def _max_output_tokens(model: str) -> int:
+    """Anthropic's `max_tokens` request field is required and hard-caps a single
+    turn's output -- unlike OpenAI-compatible/Gemini, which need no equivalent
+    parameter here at all. A flat constant either wastes a capable model's real
+    ceiling or (as the old MAX_TOKENS = 4096 did) truncates one that supports far
+    more, which would silently look like a quality failure in a fair cross-model
+    benchmark rather than the artificial limit it actually is. See
+    mazu/llm/capabilities.py's MAX_OUTPUT_TOKENS for the model table and its
+    "best-effort, will go stale" caveat.
+    """
+    return MAX_OUTPUT_TOKENS.get(f"anthropic:{model}", DEFAULT_ANTHROPIC_MAX_TOKENS)
 
 
 def _with_cache_control(message: dict) -> dict:
@@ -75,7 +94,7 @@ class AnthropicProvider(Provider):
         try:
             response = client.messages.create(
                 model=model,
-                max_tokens=MAX_TOKENS,
+                max_tokens=_max_output_tokens(model),
                 system=[
                     {
                         "type": "text",
@@ -108,7 +127,7 @@ class AnthropicProvider(Provider):
         try:
             with client.messages.stream(
                 model=model,
-                max_tokens=MAX_TOKENS,
+                max_tokens=_max_output_tokens(model),
                 system=[
                     {
                         "type": "text",
@@ -136,14 +155,14 @@ class AnthropicProvider(Provider):
 
     def run_forced_tool(
         self, messages: list[dict], system: str, tool: dict, model: str
-    ) -> dict:
+    ) -> tuple[dict, dict]:
         import anthropic
 
         client = self._get_client()
         try:
             response = client.messages.create(
                 model=model,
-                max_tokens=1024,
+                max_tokens=FORCED_TOOL_MAX_TOKENS,
                 system=[
                     {
                         "type": "text",
@@ -157,7 +176,8 @@ class AnthropicProvider(Provider):
             )
         except anthropic.AnthropicError as e:
             raise classify_sdk_error(anthropic, e) from e
+        usage = response.usage.model_dump()
         for block in response.content:
             if block.type == "tool_use" and block.name == tool["name"]:
-                return block.input
-        return {}
+                return block.input, usage
+        return {}, usage

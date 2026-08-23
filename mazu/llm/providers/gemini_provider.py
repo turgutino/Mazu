@@ -113,6 +113,13 @@ def _parse_gemini_response(response) -> AgentResponse:
         usage = {
             "input_tokens": usage_obj.prompt_token_count or 0,
             "output_tokens": usage_obj.candidates_token_count or 0,
+            # Only ever surfaces what Gemini itself reports (implicit, automatic
+            # prompt-prefix caching -- Mazu requests no explicit CachedContent).
+            # getattr guards against an older google-genai SDK version whose
+            # UsageMetadata predates this field; absent/None both mean "no cache
+            # data available", same as every other provider's cache fields --
+            # never estimated or assumed non-zero.
+            "cached_content_token_count": getattr(usage_obj, "cached_content_token_count", None) or 0,
         }
 
     return AgentResponse(stop_reason=stop_reason, content=content_blocks, usage=usage)
@@ -196,7 +203,7 @@ class GeminiProvider(Provider):
 
     def run_forced_tool(
         self, messages: list[dict], system: str, tool: dict, model: str
-    ) -> dict:
+    ) -> tuple[dict, dict]:
         client = self._get_client()
         from google.genai import types
 
@@ -220,5 +227,5 @@ class GeminiProvider(Provider):
         parsed = _parse_gemini_response(response)
         for block in parsed.content:
             if block["type"] == "tool_use" and block["name"] == tool["name"]:
-                return block["input"]
-        return {}
+                return block["input"], parsed.usage
+        return {}, parsed.usage

@@ -25,6 +25,42 @@ CONTEXT_WINDOW_TOKENS: dict[str, int] = {
     "gemini:gemini-2.0-flash": 1_000_000,
 }
 
+# Maximum output tokens Anthropic will generate in a single turn, self-reported by
+# each model's own documentation at the time this table was written -- same
+# "best-effort, will go stale, verify against provider docs before relying on it"
+# character as CONTEXT_WINDOW_TOKENS above. Anthropic's `max_tokens` request field
+# is REQUIRED (unlike OpenAI-compatible/Gemini, which both accept an unbounded
+# request and cap output at the model's own ceiling with no client-side value
+# needed) -- so a real per-model table is what avoids Mazu imposing an artificial,
+# needlessly low ceiling on a model that supports far more, while still not
+# blindly sending some enormous made-up number for a model that can't honor it.
+# Only Anthropic needs this table: OpenAI-compatible/Gemini providers never pass
+# a max-output-tokens parameter at all today, so their models are unaffected by
+# this cap (see anthropic_provider.py's _max_output_tokens; other providers'
+# run_turn/run_turn_stream have no equivalent parameter).
+#
+# Hard ceiling caught live: mazu/agent/autonomous.py (the engine behind `mazu
+# run`/`mazu explore`) calls Anthropic exclusively through the NON-streaming
+# run_turn, never run_turn_stream. The Anthropic Python SDK's own client-side
+# guard (_calculate_nonstreaming_timeout) rejects any non-streaming request
+# whose max_tokens implies more than 10 minutes of possible generation time --
+# concretely, max_tokens > 21_333 -- raising a ValueError before the request is
+# even sent, with zero API cost incurred. Every value below MUST stay under
+# that ceiling, or Anthropic becomes silently unusable for every `mazu run`/
+# `mazu explore` invocation. (Streaming call sites like `mazu chat` have no such
+# limit; this constraint is specific to the non-streaming path.)
+MAX_OUTPUT_TOKENS: dict[str, int] = {
+    "anthropic:claude-opus-4-8": 16_000,
+    "anthropic:claude-sonnet-5": 16_000,
+    "anthropic:claude-haiku-4-5": 8_192,
+}
+# Fallback for any Anthropic model not in the table above (an older or
+# newer/unreleased-at-table-writing-time model) -- deliberately conservative
+# (higher than the old flat 4096 that motivated this table, but not an arbitrary
+# huge number that could fail against a real, lower-ceiling model this table
+# simply doesn't know about yet).
+DEFAULT_ANTHROPIC_MAX_TOKENS = 8_192
+
 # Whether Mazu implements REAL token-by-token streaming for this provider (vs.
 # falling back to Provider's default run_turn_stream, which waits for the complete
 # response and then delivers it to on_delta as a single chunk -- still correct output,

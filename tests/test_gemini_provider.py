@@ -178,7 +178,27 @@ def test_parse_usage_metadata():
     )
     response = _make_response([types.Part.from_text(text="hi")], usage=usage)
     result = _parse_gemini_response(response)
-    assert result.usage == {"input_tokens": 100, "output_tokens": 50}
+    assert result.usage == {
+        "input_tokens": 100,
+        "output_tokens": 50,
+        "cached_content_token_count": 0,
+    }
+
+
+def test_parse_usage_metadata_with_cached_content():
+    """Gemini's implicit prompt-prefix caching reports a real, non-zero
+    cached_content_token_count -- must be surfaced, not dropped, so cost/usage
+    reporting can see it (see mazu.llm.client.extract_cache_tokens)."""
+    usage = types.GenerateContentResponseUsageMetadata(
+        prompt_token_count=1000, candidates_token_count=50, cached_content_token_count=800
+    )
+    response = _make_response([types.Part.from_text(text="hi")], usage=usage)
+    result = _parse_gemini_response(response)
+    assert result.usage == {
+        "input_tokens": 1000,
+        "output_tokens": 50,
+        "cached_content_token_count": 800,
+    }
 
 
 def test_parse_missing_usage_metadata_does_not_crash():
@@ -294,9 +314,10 @@ def test_run_forced_tool_extracts_matching_call(monkeypatch):
     provider._client = fake_client
 
     tool = {"name": "my_tool", "description": "d", "input_schema": {}}
-    result = provider.run_forced_tool([{"role": "user", "content": "hi"}], "sys", tool, "gemini-2.0-flash")
+    result, usage = provider.run_forced_tool([{"role": "user", "content": "hi"}], "sys", tool, "gemini-2.0-flash")
 
     assert result == {"x": 1}
+    assert isinstance(usage, dict)
 
 
 # ---------------------------------------------------------------------------
