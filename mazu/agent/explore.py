@@ -22,6 +22,7 @@ from mazu.agent.council import _SharedCostTracker
 from mazu.agent.registry_factory import build_registry
 from mazu.checkpoint.manager import CheckpointManager, _backup_sqlite
 from mazu.checkpoint.worktree import add_worktree
+from mazu.memory.belief_log import BeliefShadowLogStore
 from mazu.memory.store import MemoryStore
 from mazu.runs.store import RunStore
 from mazu.skills.manager import SkillManager
@@ -114,6 +115,7 @@ def _run_one_branch(
     usage_db_path = Path.home() / ".mazu" / "usage.db"
     action_log_db_path = worktree_path / ".mazu" / "action_log.db"
     runs_db_path = worktree_path / ".mazu" / "runs.db"
+    belief_shadow_db_path = worktree_path / ".mazu" / "belief_shadow.db"
 
     memory_store = MemoryStore(memory_db_path)
     global_memory_store = MemoryStore(global_memory_db_path)
@@ -121,10 +123,13 @@ def _run_one_branch(
     usage_store = UsageStore(usage_db_path)
     action_log_store = ActionLogStore(action_log_db_path)
     run_store = RunStore(runs_db_path)
+    belief_log = BeliefShadowLogStore(belief_shadow_db_path)
     checkpoint_manager = CheckpointManager(worktree_path)
     session_id = str(uuid.uuid4())
 
-    registry = build_registry(worktree_path, memory_store, global_memory_store, skill_manager, session_id)
+    registry = build_registry(
+        worktree_path, memory_store, global_memory_store, skill_manager, session_id, belief_log=belief_log
+    )
 
     error: str | None = None
     try:
@@ -151,6 +156,7 @@ def _run_one_branch(
             origin_checkpoint_id=origin_checkpoint_id,
             branch_name=branch_slug,
             shared_cost_tracker=shared_tracker,
+            belief_log=belief_log,
         )
         # run_autonomous's own `finally` block already closed run_store/usage_store/
         # action_log_store/global_memory_store -- re-open short-lived fresh

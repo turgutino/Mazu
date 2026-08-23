@@ -1,11 +1,87 @@
 from mazu.memory.embeddings import embed_text
-from mazu.memory.store import MemoryStore
+from mazu.memory.store import MemoryStore, _memory_similarity
 from mazu.tools.base import Tool, ToolResult
 
 CATEGORIES = ["decision", "convention", "mistake", "task_outcome", "fact", "user_preference"]
 
 
-def make_memory_tools(store: MemoryStore, global_store: MemoryStore, session_id: str) -> list[Tool]:
+def _observe_explicit_remember(
+    belief_log,
+    project: str | None,
+    session_id: str,
+    category: str,
+    memory_id: int,
+    input: dict,
+    target_store: MemoryStore,
+    supersedes_id: int | None,
+    old_row,
+    tool_message: str,
+    tool_is_error: bool,
+) -> None:
+    """SHADOW-ONLY observer for a real `remember` tool call, already completed by
+    the time this runs. Zero LLM calls: an explicit supersede already tells us the
+    relationship (the agent asserted it by acting on it -- no need to guess), and
+    a plain insert only gets a local, zero-cost gray-zone lookup (reusing
+    find_gray_zone_match, the same Jaccard check the auto-extraction shadow path
+    already uses) to note whether a similar memory existed that the agent chose
+    NOT to touch. Never raises past its own try/except in the caller.
+    """
+    if supersedes_id is not None:
+        similarity = None
+        if old_row is not None:
+            similarity = _memory_similarity(
+                old_row["title"], old_row["body"], input["title"], input["body"]
+            )
+        belief_log.log_explicit_action(
+            session_id=session_id,
+            project=project,
+            action_type="supersede",
+            category=category,
+            new_memory_id=memory_id,
+            new_title=input["title"],
+            new_body=input["body"],
+            old_memory_id=supersedes_id,
+            old_title=old_row["title"] if old_row is not None else None,
+            old_body=old_row["body"] if old_row is not None else None,
+            similarity_score=similarity,
+            # The agent itself chose to supersede -- that IS the asserted
+            # relationship, not a guess. Never computed by a classifier.
+            asserted_relationship="replacement",
+            tool_result=tool_message,
+            tool_success=not tool_is_error,
+        )
+        return
+
+    # Plain insert: local-only gray-zone lookup against what's now active in the
+    # same category (excluding the row we just inserted). No classifier call.
+    from mazu.memory.belief import find_gray_zone_match
+
+    nearest_row, nearest_score = find_gray_zone_match(
+        target_store, category, input["title"], input["body"]
+    )
+    belief_log.log_explicit_action(
+        session_id=session_id,
+        project=project,
+        action_type="insert",
+        category=category,
+        new_memory_id=memory_id,
+        new_title=input["title"],
+        new_body=input["body"],
+        nearest_active_memory_id=nearest_row["id"] if nearest_row is not None else None,
+        nearest_active_title=nearest_row["title"] if nearest_row is not None else None,
+        nearest_active_similarity=nearest_score if nearest_row is not None else None,
+        tool_result=tool_message,
+        tool_success=not tool_is_error,
+    )
+
+
+def make_memory_tools(
+    store: MemoryStore,
+    global_store: MemoryStore,
+    session_id: str,
+    belief_log=None,
+    project: str | None = None,
+) -> list[Tool]:
     def remember(input: dict) -> ToolResult:
         try:
             category = input["category"]
@@ -16,6 +92,13 @@ def make_memory_tools(store: MemoryStore, global_store: MemoryStore, session_id:
             # -- add() stores None as a plain NULL, so this never changes behavior for
             # anyone who hasn't turned semantic search on.
             embedding = embed_text(f"{input['title']} {input['body']}")
+            supersedes_id = input.get("supersedes_id")
+            # Fetched BEFORE add()/supersede() so the shadow observer sees the old
+            # memory's content exactly as it was when the agent decided to replace
+            # it -- purely a read, changes nothing.
+            old_row = (
+                target_store.get(int(supersedes_id)) if supersedes_id is not None else None
+            )
             memory_id = target_store.add(
                 category=category,
                 title=input["title"],
@@ -26,14 +109,28 @@ def make_memory_tools(store: MemoryStore, global_store: MemoryStore, session_id:
                 embedding=embedding,
             )
             note = ""
-            supersedes_id = input.get("supersedes_id")
             if supersedes_id is not None:
                 if target_store.supersede(int(supersedes_id), memory_id):
                     note = f" (marked memory {supersedes_id} as superseded)"
                 else:
                     note = f" (warning: no memory with id {supersedes_id} to supersede)"
             scope = "global, all projects" if category == "user_preference" else "this project"
-            return ToolResult(f"Remembered (id={memory_id}, {scope}): {input['title']}{note}")
+            message = f"Remembered (id={memory_id}, {scope}): {input['title']}{note}"
+
+            if belief_log is not None:
+                try:
+                    _observe_explicit_remember(
+                        belief_log, project, session_id, category, memory_id, input,
+                        target_store, supersedes_id, old_row, message, False,
+                    )
+                except Exception:
+                    # Shadow observation must never affect the real, already-completed
+                    # remember/supersede action above -- swallow silently, same
+                    # "best-effort, never blocks the real thing" contract as the
+                    # auto-extraction shadow path.
+                    pass
+
+            return ToolResult(message)
         except Exception as e:
             return ToolResult(str(e), is_error=True)
 

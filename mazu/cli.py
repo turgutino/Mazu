@@ -13,6 +13,7 @@ from mazu.agent.explore import DEFAULT_MAX_EXPLORE_STEPS, MAX_EXPLORE_APPROACHES
 from mazu.agent.loop import run_chat_loop
 from mazu.agent.registry_factory import build_registry as _build_registry
 from mazu.banner import print_banner
+from mazu.chat.store import ChatStore
 from mazu.checkpoint.manager import CheckpointManager
 from mazu.config import (
     _SECRET_CONFIG_KEYS,
@@ -28,6 +29,7 @@ from mazu.curator.orchestrator import run_curator
 from mazu.curator.store import CuratorStore
 from mazu.diagnostics import apply_fixes, check_live_api_key, ensure_gitignore, run_diagnostics
 from mazu.llm.capabilities import list_capabilities
+from mazu.memory.belief_log import BeliefShadowLogStore
 from mazu.memory.consolidate import apply_consolidation, find_duplicate_clusters
 from mazu.memory.retrieval import explain_retrieval
 from mazu.memory.staleness import DEFAULT_STALE_DAYS, apply_archival, find_stale_candidates
@@ -59,6 +61,13 @@ def _memory_db_path(root: Path) -> Path:
     return _mazu_dir(root) / "memory.db"
 
 
+def _belief_shadow_db_path(root: Path) -> Path:
+    # Project-scoped, next to memory.db -- SHADOW-MODE ONLY (mazu/memory/belief.py):
+    # records what a live contradiction-detection system WOULD do, never mutates
+    # memory.db itself. See that module's docstring for the full design.
+    return _mazu_dir(root) / "belief_shadow.db"
+
+
 def _global_memory_db_path() -> Path:
     # Deliberately not tied to any project root — this is the one store shared across
     # every project, for durable facts about the person, not the codebase.
@@ -76,6 +85,12 @@ def _runs_db_path(root: Path) -> Path:
     # Project-scoped like memory.db/action_log.db -- a run's id is a session_id, and
     # session-scoped state is per-project throughout Mazu.
     return _mazu_dir(root) / "runs.db"
+
+
+def _chat_db_path(root: Path) -> Path:
+    # Project-scoped like memory.db/action_log.db -- a chat transcript belongs to
+    # whichever project it happened in, same as everything else keyed by session_id.
+    return _mazu_dir(root) / "chat_history.db"
 
 
 def _usage_db_path() -> Path:
@@ -390,10 +405,76 @@ def config_unset(key: str) -> None:
     "still applies on top regardless. Default: no allowlist, every non-denylisted "
     "command is allowed (unchanged behavior).",
 )
-def chat(model: str | None, shell_allowlist: str | None) -> None:
+@click.option(
+    "--resume",
+    "resume_session_id",
+    default=None,
+    metavar="SESSION_ID",
+    help="Continue a past chat session, replaying its full saved history first. "
+    "See `mazu chat --list` for session ids.",
+)
+@click.option(
+    "--list",
+    "list_sessions",
+    is_flag=True,
+    default=False,
+    help="List past chat sessions in this project (most recently active first) and exit.",
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    default=False,
+    help="With --list, print sessions as a JSON array instead of a table.",
+)
+@click.option(
+    "--delete",
+    "delete_session_id",
+    default=None,
+    metavar="SESSION_ID",
+    help="Permanently delete a past chat session's saved history and exit. "
+    "See `mazu chat --list` for session ids.",
+)
+def chat(
+    model: str | None,
+    shell_allowlist: str | None,
+    resume_session_id: str | None,
+    list_sessions: bool,
+    as_json: bool,
+    delete_session_id: str | None,
+) -> None:
     """Start an interactive chat session in the current directory."""
-    ensure_api_key(model)
     root = Path.cwd()
+
+    if delete_session_id is not None:
+        chat_store = ChatStore(_chat_db_path(root))
+        ok = chat_store.delete_session(delete_session_id)
+        chat_store.close()
+        if ok:
+            click.echo(f"Deleted chat session {delete_session_id}.")
+        else:
+            click.echo(f"No chat session found with id {delete_session_id}.")
+        return
+
+    if list_sessions:
+        chat_store = ChatStore(_chat_db_path(root))
+        rows = chat_store.list_sessions(limit=50)
+        chat_store.close()
+        if as_json:
+            emit_json([row_to_dict(r) for r in rows])
+            return
+        if not rows:
+            click.echo("No chat sessions yet in this project.")
+            return
+        for row in rows:
+            title = row["title"] or "(no title)"
+            click.echo(
+                f"{row['session_id']}  {row['updated_at']}  "
+                f"{row['message_count']} message(s)  {title}"
+            )
+        return
+
+    ensure_api_key(model)
     ensure_gitignore(root)
 
     memory_store = MemoryStore(_memory_db_path(root))
@@ -402,9 +483,24 @@ def chat(model: str | None, shell_allowlist: str | None) -> None:
     checkpoint_manager = CheckpointManager(root)
     usage_store = UsageStore(_usage_db_path())
     action_log_store = ActionLogStore(_action_log_db_path(root))
-    session_id = str(uuid.uuid4())
+    chat_store = ChatStore(_chat_db_path(root))
+    belief_log = BeliefShadowLogStore(_belief_shadow_db_path(root))
 
-    registry = _build_registry(root, memory_store, global_memory_store, skill_manager, session_id)
+    resumed_messages = None
+    if resume_session_id is not None:
+        resumed_messages = chat_store.get_messages(resume_session_id)
+        if not resumed_messages:
+            chat_store.close()
+            click.echo(f"No saved messages found for chat session {resume_session_id}.")
+            return
+        session_id = resume_session_id
+        click.echo(f"Resuming chat {session_id} ({len(resumed_messages)} prior message(s)).")
+    else:
+        session_id = str(uuid.uuid4())
+
+    registry = _build_registry(
+        root, memory_store, global_memory_store, skill_manager, session_id, belief_log=belief_log
+    )
 
     run_chat_loop(
         registry,
@@ -416,7 +512,10 @@ def chat(model: str | None, shell_allowlist: str | None) -> None:
         model=model,
         usage_store=usage_store,
         action_log_store=action_log_store,
+        chat_store=chat_store,
+        resumed_messages=resumed_messages,
         shell_allowlist=_parse_shell_allowlist(shell_allowlist),
+        belief_log=belief_log,
     )
 
 
@@ -596,10 +695,12 @@ def run(
     skill_manager = SkillManager(root)
     usage_store = UsageStore(_usage_db_path())
     action_log_store = ActionLogStore(_action_log_db_path(root))
+    belief_log = BeliefShadowLogStore(_belief_shadow_db_path(root))
     session_id = resume_run_id if resume_run_id is not None else str(uuid.uuid4())
 
     registry = _build_registry(
-        root, memory_store, global_memory_store, skill_manager, session_id, dry_run=dry_run
+        root, memory_store, global_memory_store, skill_manager, session_id, dry_run=dry_run,
+        belief_log=belief_log,
     )
 
     run_autonomous(
@@ -624,6 +725,7 @@ def run(
         origin_checkpoint_id=origin_checkpoint_id,
         parent_run_id=parent_run_id,
         branch_name=branch_name,
+        belief_log=belief_log,
     )
 
 
@@ -1328,6 +1430,14 @@ def usage_cmd(since_days: int | None, command_filter: str | None) -> None:
             f"  {row['provider']}:{row['model']:<28} {row['calls']:>4} calls   "
             f"{row['input_tokens']:>8} in / {row['output_tokens']:>8} out   {cost}"
         )
+    if summary["total_cache_read_tokens"] or summary["total_cache_write_tokens"]:
+        click.echo(
+            f"\nPrompt caching: {summary['total_cache_read_tokens']:,} cache-read token(s), "
+            f"{summary['total_cache_write_tokens']:,} cache-write token(s) — cache reads are "
+            f"billed at a fraction of the normal input rate and are already reflected in the "
+            f"cost above. Only counted where the provider actually reports it (Anthropic, "
+            f"and OpenAI-compatible providers with automatic prompt caching)."
+        )
     if summary["has_unpriced_calls"]:
         click.echo(
             "\nNote: some calls used a model with no entry in the pricing table and "
@@ -1722,6 +1832,122 @@ def memory_stats(use_global: bool) -> None:
         click.echo(f"\nOldest: [{stats['oldest']['id']}] {stats['oldest']['title']} ({stats['oldest']['created_at']})")
     if stats["newest"]:
         click.echo(f"Newest: [{stats['newest']['id']}] {stats['newest']['title']} ({stats['newest']['created_at']})")
+
+
+# Below this many logged shadow decisions, any distribution/accuracy claim would
+# be noise dressed up as a statistic -- `mazu memory-belief stats` refuses to
+# draw conclusions and says so explicitly instead. Not a hard technical limit,
+# just an honesty threshold: real evidence-gathering (mazu.memory.belief's whole
+# purpose) shouldn't be undercut by a report that looks confident on 2 rows.
+MIN_DECISIONS_FOR_STATS = 20
+
+
+@main.group("memory-belief")
+def memory_belief() -> None:
+    """Inspect Phase 3's SHADOW-MODE belief-maintenance decisions
+    (.mazu/belief_shadow.db) -- read-only evidence-gathering only. Nothing here
+    ever touches memory.db: no memory is superseded, edited, archived, or
+    flagged by these commands, no matter what the logged data shows. See
+    mazu/memory/belief.py for what actually writes to this log."""
+
+
+@memory_belief.command("stats")
+@click.option(
+    "--json", "as_json", is_flag=True, default=False,
+    help="Emit machine-readable JSON instead of formatted text.",
+)
+def memory_belief_stats(as_json: bool) -> None:
+    """Summarize every shadow decision logged so far for this project: real
+    counts only, never estimated or extrapolated. Read-only against
+    belief_shadow.db; never touches memory.db."""
+    db_path = _belief_shadow_db_path(Path.cwd())
+    log = BeliefShadowLogStore(db_path)
+    stats = log.stats()
+    log.close()
+
+    if as_json:
+        emit_json({**stats, "min_decisions_for_confidence": MIN_DECISIONS_FOR_STATS})
+        return
+
+    click.echo(f"Total shadow decisions: {stats['total']}")
+    if stats["total"] == 0:
+        click.echo("No shadow decisions logged yet — nothing to evaluate.")
+        return
+    if stats["total"] < MIN_DECISIONS_FOR_STATS:
+        click.echo(
+            f"\n[caveat] Only {stats['total']} decision(s) logged so far — below the "
+            f"{MIN_DECISIONS_FOR_STATS}-decision floor for drawing any real conclusion "
+            "about classifier accuracy. The breakdown below is shown for visibility "
+            "only; treat it as too small a sample to act on."
+        )
+
+    def _echo_distribution(title: str, dist: dict) -> None:
+        click.echo(f"\n{title}:")
+        if not dist:
+            click.echo("  (none)")
+            return
+        for key, count in sorted(dist.items(), key=lambda kv: -kv[1]):
+            label = key if key is not None else "(unset — classifier failed)"
+            click.echo(f"  {label}: {count}")
+
+    _echo_distribution("By relationship", stats["by_relationship"])
+    _echo_distribution("By confidence", stats["by_confidence"])
+    _echo_distribution("By proposed action", stats["by_proposed_action"])
+
+    avg_sim = stats["avg_similarity_score"]
+    click.echo(f"\nAverage similarity score: {avg_sim:.3f}" if avg_sim is not None else "\nAverage similarity score: n/a")
+    click.echo(f"Classifier failures: {stats['classifier_failed_count']}")
+    click.echo(f"Would have superseded an old memory: {stats['would_supersede_count']}")
+    click.echo(f"Flagged for review (not auto-resolved): {stats['flagged_for_review_count']}")
+    click.echo(
+        "\nNote: this is SHADOW MODE data. Nothing listed here was actually applied "
+        "to any memory — every real memory is exactly as it was before this decision "
+        "was logged."
+    )
+
+
+@memory_belief.command("review")
+@click.option("--relationship", default=None, help="Filter by classified relationship (e.g. contradiction).")
+@click.option("--confidence", default=None, help="Filter by confidence (low, medium, high).")
+@click.option("--limit", default=20, show_default=True, type=int, help="Maximum decisions to show, most recent first.")
+@click.option(
+    "--json", "as_json", is_flag=True, default=False,
+    help="Emit machine-readable JSON instead of formatted text.",
+)
+def memory_belief_review(relationship: str | None, confidence: str | None, limit: int, as_json: bool) -> None:
+    """Show recent shadow decisions in human-readable form for manual review.
+    Read-only against belief_shadow.db; never touches memory.db, and never
+    applies, approves, or rejects anything -- purely for a human to read."""
+    db_path = _belief_shadow_db_path(Path.cwd())
+    log = BeliefShadowLogStore(db_path)
+    rows = log.recent(limit=limit, relationship=relationship, confidence=confidence)
+    log.close()
+
+    if as_json:
+        emit_json([row_to_dict(r, bool_fields=("would_supersede", "classifier_failed")) for r in rows])
+        return
+
+    if not rows:
+        click.echo("No shadow decisions match.")
+        return
+
+    for row in rows:
+        click.echo(f"\n[{row['id']}] {row['created_at']}  (category: {row['category']})")
+        click.echo(f"  NEW: {row['new_title']}")
+        click.echo(f"       {row['new_body']}")
+        if row["related_memory_id"] is not None:
+            sim = f"{row['similarity_score']:.3f}" if row["similarity_score"] is not None else "n/a"
+            click.echo(f"  OLD: [{row['related_memory_id']}] {row['related_title']}  (similarity: {sim})")
+        if row["classifier_failed"]:
+            click.echo(f"  CLASSIFIER FAILED: {row['reasoning']}")
+        else:
+            click.echo(f"  relationship: {row['relationship']}  confidence: {row['confidence']}")
+            click.echo(f"  proposed action: {row['proposed_action']} (would_supersede={bool(row['would_supersede'])})")
+            if row["reasoning"]:
+                click.echo(f"  reasoning: {row['reasoning']}")
+    click.echo(
+        "\n(shadow mode — none of the above was actually applied to any memory)"
+    )
 
 
 def _curator_db_path(root: Path) -> Path:

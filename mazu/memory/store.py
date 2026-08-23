@@ -70,6 +70,9 @@ class MemoryStore:
         if "archived" not in columns:
             self.conn.execute("ALTER TABLE memories ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
             self.conn.commit()
+        if "needs_review" not in columns:
+            self.conn.execute("ALTER TABLE memories ADD COLUMN needs_review INTEGER NOT NULL DEFAULT 0")
+            self.conn.commit()
 
     def add(
         self,

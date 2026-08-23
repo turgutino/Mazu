@@ -6,9 +6,10 @@ from mazu.agent.interaction import safe_confirm
 from mazu.agent.session import finalize_session
 from mazu.banner import print_banner
 from mazu.checkpoint.manager import CheckpointManager
-from mazu.llm.client import _split_model, default_model, run_turn, summarize_usage
+from mazu.llm.client import _split_model, default_model, extract_cost_tokens, run_turn, summarize_usage
 from mazu.llm.errors import MazuAPIError, MazuContextLengthError
 from mazu.llm.pricing import estimate_cost
+from mazu.memory.belief_log import BeliefShadowLogStore
 from mazu.memory.store import MemoryStore
 from mazu.runs.store import RunStore
 from mazu.skills.manager import SkillManager
@@ -76,6 +77,7 @@ def run_autonomous(
     parent_run_id: str | None = None,
     branch_name: str | None = None,
     shared_cost_tracker: "_SharedCostTracker | None" = None,
+    belief_log: "BeliefShadowLogStore | None" = None,
 ) -> None:
     # The clean-baseline requirement exists so a real run's checkpoints are
     # meaningful diffs against a known-good starting point. A dry run never writes
@@ -199,7 +201,14 @@ def run_autonomous(
                 step_out = usage.get("output_tokens", usage.get("completion_tokens", 0)) or 0
                 total_in += step_in
                 total_out += step_out
-                step_cost = estimate_cost(resolved_model, step_in, step_out) if cost_trackable else None
+                cost_step_in, _, cache_read_tokens, cache_write_tokens = extract_cost_tokens(usage)
+                step_cost = (
+                    estimate_cost(
+                        resolved_model, cost_step_in, step_out,
+                        cache_read_tokens=cache_read_tokens, cache_write_tokens=cache_write_tokens,
+                    )
+                    if cost_trackable else None
+                )
                 cost_suffix = ""
                 if step_cost is not None:
                     total_cost += step_cost
@@ -214,7 +223,8 @@ def run_autonomous(
                 )
                 if usage_store is not None:
                     usage_store.log(
-                        "run", session_id, provider_name, model_name, step_in, step_out, step_cost
+                        "run", session_id, provider_name, model_name, step_in, step_out, step_cost,
+                        cache_read_tokens=cache_read_tokens or None, cache_write_tokens=cache_write_tokens or None,
                     )
                 print(
                     f"[usage] step: {summarize_usage(usage)} | "
@@ -284,9 +294,14 @@ def run_autonomous(
     finally:
         memories_saved = 0
         if memory_store is not None:
-            memories_saved = finalize_session(memory_store, session_id, messages, model=model)
+            memories_saved = finalize_session(
+                memory_store, session_id, messages, model=model, usage_store=usage_store,
+                belief_log=belief_log,
+            )
         if global_memory_store is not None:
             global_memory_store.close()
+        if belief_log is not None:
+            belief_log.close()
         if run_store is not None:
             status = "completed" if stop_reason == "end_turn" else "stopped"
             run_store.finish(session_id, status=status, stop_reason=stop_reason or "unknown", memories_saved=memories_saved)

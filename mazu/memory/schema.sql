@@ -25,7 +25,16 @@ CREATE TABLE IF NOT EXISTS memories (
     -- superseded_by) with no replacement memory -- this is "retired, nothing took
     -- its place" rather than "replaced by something newer". Reversible via
     -- `mazu memory unarchive`, unlike forget() (a real, permanent DELETE).
-    archived        INTEGER NOT NULL DEFAULT 0
+    archived        INTEGER NOT NULL DEFAULT 0,
+    -- Reserved for the live belief-maintenance system (mazu/memory/belief.py):
+    -- flags a memory as involved in an unresolved contradiction/uncertain
+    -- replacement, so retrieval/context construction can eventually avoid
+    -- presenting it as unqualified ground truth. NOT YET READ OR WRITTEN by any
+    -- automatic code path as of this column's introduction -- belief.py currently
+    -- only logs what it WOULD set this to (see mazu/memory/belief_log.py), it never
+    -- actually sets it. Defaults to 0 for every row, old and new, so this column's
+    -- mere existence changes no behavior by itself.
+    needs_review    INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);

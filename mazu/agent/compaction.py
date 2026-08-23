@@ -1,7 +1,15 @@
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
-from mazu.llm.client import _split_model, default_model, run_turn
+from mazu.llm.client import _split_model, default_model, extract_cost_tokens, run_turn
+from mazu.llm.pricing import estimate_cost
 from mazu.memory.extraction import CHEAP_MODEL_BY_PROVIDER, render_transcript
+
+if TYPE_CHECKING:
+    from mazu.memory.belief_log import BeliefShadowLogStore
+    from mazu.memory.store import MemoryStore
+    from mazu.usage.store import UsageStore
+
+OnCompacted = Callable[[list[dict]], None]
 
 # Rough token estimate: ~4 characters per token is a standard, conservative rule of
 # thumb for English text across tokenizers. Used only to decide *when* to compact,
@@ -81,6 +89,7 @@ def compact_messages(
     messages: list[dict],
     summarize_fn: Callable[[list[dict]], str],
     keep_recent: int = DEFAULT_KEEP_RECENT,
+    on_compacted: OnCompacted | None = None,
 ) -> list[dict]:
     """Replaces the oldest portion of `messages` with a two-message synthetic
     exchange (a user-role summary + an assistant-role acknowledgment) covering
@@ -113,14 +122,23 @@ def compact_messages(
         return messages
     cut = max(valid)
 
-    summary_text = summarize_fn(messages[:cut])
+    chunk = messages[:cut]
+    summary_text = summarize_fn(chunk)
     tail = messages[cut:]
     synthetic = [{"role": "user", "content": COMPACTION_SUMMARY_PREFIX + summary_text}]
     if not tail or tail[0]["role"] == "user":
         # tail starts with "user" (or is empty) -- append an assistant ack so the
         # synthetic block itself ends in "assistant", keeping the seam alternating.
         synthetic.append({"role": "assistant", "content": COMPACTION_ACK_TEXT})
-    return [*synthetic, *tail]
+    result = [*synthetic, *tail]
+    if on_compacted is not None:
+        # Best-effort side channel (e.g. extracting durable memories from `chunk`
+        # before it's gone) -- must never break compaction itself.
+        try:
+            on_compacted(chunk)
+        except Exception:
+            pass
+    return result
 
 
 def _compaction_model(main_model: str | None) -> str:
@@ -131,14 +149,33 @@ def _compaction_model(main_model: str | None) -> str:
     return CHEAP_MODEL_BY_PROVIDER.get(provider_name, CHEAP_MODEL_BY_PROVIDER["anthropic"])
 
 
-def summarize_for_compaction(messages_to_summarize: list[dict], model: str | None) -> str:
+def summarize_for_compaction(
+    messages_to_summarize: list[dict],
+    model: str | None,
+    usage_store: "UsageStore | None" = None,
+    session_id: str | None = None,
+) -> str:
+    compaction_model = _compaction_model(model)
     transcript = render_transcript(messages_to_summarize)
     response = run_turn(
         messages=[{"role": "user", "content": f"Summarize this:\n\n{transcript}"}],
         system=COMPACTION_SYSTEM,
         tools=[],
-        model=_compaction_model(model),
+        model=compaction_model,
     )
+    if usage_store is not None:
+        provider_name, model_name = _split_model(compaction_model)
+        input_tokens = response.usage.get("input_tokens", response.usage.get("prompt_tokens", 0)) or 0
+        output_tokens = response.usage.get("output_tokens", response.usage.get("completion_tokens", 0)) or 0
+        cost_input_tokens, _, cache_read_tokens, cache_write_tokens = extract_cost_tokens(response.usage)
+        cost = estimate_cost(
+            compaction_model, cost_input_tokens, output_tokens,
+            cache_read_tokens=cache_read_tokens, cache_write_tokens=cache_write_tokens,
+        )
+        usage_store.log(
+            "compaction", session_id, provider_name, model_name, input_tokens, output_tokens, cost,
+            cache_read_tokens=cache_read_tokens or None, cache_write_tokens=cache_write_tokens or None,
+        )
     text_blocks = [b["text"] for b in response.content if b.get("type") == "text"]
     return "\n".join(text_blocks) or "(no summary content returned)"
 
@@ -148,6 +185,9 @@ def compact_if_needed(
     model: str | None,
     trigger_tokens: int = DEFAULT_TRIGGER_TOKENS,
     keep_recent: int = DEFAULT_KEEP_RECENT,
+    usage_store: "UsageStore | None" = None,
+    session_id: str | None = None,
+    on_compacted: OnCompacted | None = None,
 ) -> tuple[list[dict], bool]:
     """Proactive check, meant to be called once per round before the main model
     call. Returns (new_messages, True) if the estimated size exceeded
@@ -157,13 +197,21 @@ def compact_if_needed(
     if not needs_compaction(messages, trigger_tokens):
         return messages, False
     compacted = compact_messages(
-        messages, lambda mm: summarize_for_compaction(mm, model), keep_recent=keep_recent
+        messages,
+        lambda mm: summarize_for_compaction(mm, model, usage_store=usage_store, session_id=session_id),
+        keep_recent=keep_recent,
+        on_compacted=on_compacted,
     )
     return compacted, compacted is not messages
 
 
 def force_compact(
-    messages: list[dict], model: str | None, keep_recent: int = AGGRESSIVE_KEEP_RECENT
+    messages: list[dict],
+    model: str | None,
+    keep_recent: int = AGGRESSIVE_KEEP_RECENT,
+    usage_store: "UsageStore | None" = None,
+    session_id: str | None = None,
+    on_compacted: OnCompacted | None = None,
 ) -> list[dict]:
     """Reactive fallback for when a MazuContextLengthError already happened despite
     the proactive check (e.g. the char-based estimate undershot, or a single message
@@ -172,5 +220,40 @@ def force_compact(
     so the retry has the best realistic chance of fitting.
     """
     return compact_messages(
-        messages, lambda mm: summarize_for_compaction(mm, model), keep_recent=keep_recent
+        messages,
+        lambda mm: summarize_for_compaction(mm, model, usage_store=usage_store, session_id=session_id),
+        keep_recent=keep_recent,
+        on_compacted=on_compacted,
     )
+
+
+def extract_memories_on_compaction(
+    memory_store: "MemoryStore | None",
+    session_id: str,
+    model: str | None,
+    usage_store: "UsageStore | None" = None,
+    belief_log: "BeliefShadowLogStore | None" = None,
+) -> OnCompacted | None:
+    """Builds an on_compacted callback that extracts durable memories from the chunk
+    being compacted away and inserts them into `memory_store`, so useful facts
+    survive as structured, searchable entries instead of only living inside a
+    summary that a LATER compaction could re-summarize into oblivion. Returns None
+    if memory_store is None (memory disabled), so callers can pass the result
+    straight through without an extra None-check.
+
+    `belief_log`, when given, is forwarded to insert_extracted_memories() to run
+    the SHADOW-MODE belief check (mazu.memory.belief) against whatever this
+    compaction event extracts -- purely observational, never mutates
+    memory_store. Defaults to None: omitting it reproduces today's exact behavior.
+    """
+    if memory_store is None:
+        return None
+
+    def _on_compacted(chunk: list[dict]) -> None:
+        from mazu.agent.session import insert_extracted_memories
+
+        insert_extracted_memories(
+            memory_store, session_id, chunk, model=model, usage_store=usage_store, belief_log=belief_log
+        )
+
+    return _on_compacted

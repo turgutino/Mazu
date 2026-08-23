@@ -11,8 +11,10 @@ from mazu.agent.compaction import (
     compact_if_needed,
     compact_messages,
     estimate_tokens,
+    extract_memories_on_compaction,
     force_compact,
     needs_compaction,
+    summarize_for_compaction,
     _round_boundaries,
 )
 
@@ -206,7 +208,7 @@ def test_compact_if_needed_compacts_above_trigger(monkeypatch):
         messages.append(_assistant_text(f"response {i}" * 50))
 
     monkeypatch.setattr(
-        "mazu.agent.compaction.summarize_for_compaction", lambda mm, model: "SUMMARY"
+        "mazu.agent.compaction.summarize_for_compaction", lambda mm, model, **kwargs: "SUMMARY"
     )
 
     result, did_compact = compact_if_needed(messages, model=None, trigger_tokens=10, keep_recent=6)
@@ -223,7 +225,7 @@ def test_force_compact_uses_aggressive_keep_recent(monkeypatch):
         messages.append(_assistant_text(f"response {i}"))
 
     monkeypatch.setattr(
-        "mazu.agent.compaction.summarize_for_compaction", lambda mm, model: "SUMMARY"
+        "mazu.agent.compaction.summarize_for_compaction", lambda mm, model, **kwargs: "SUMMARY"
     )
 
     result = force_compact(messages, model=None)
@@ -231,3 +233,117 @@ def test_force_compact_uses_aggressive_keep_recent(monkeypatch):
     # AGGRESSIVE_KEEP_RECENT (4) < DEFAULT_KEEP_RECENT (10) -- fewer messages survive.
     assert len(result) - 2 == 4  # minus the 2 synthetic summary/ack messages
     _assert_strictly_alternating(result)
+
+
+# ---------------------------------------------------------------------------
+# on_compacted callback + usage_store cost logging (chat compaction wiring)
+# ---------------------------------------------------------------------------
+
+
+def test_on_compacted_receives_exactly_the_removed_chunk():
+    messages = []
+    for i in range(20):
+        messages.append(_user(f"task {i}"))
+        messages.append(_assistant_text(f"response {i}"))
+
+    received = {}
+
+    def _on_compacted(chunk):
+        received["chunk"] = chunk
+
+    result = compact_messages(
+        messages, lambda mm: "SUMMARY", keep_recent=6, on_compacted=_on_compacted
+    )
+
+    assert "chunk" in received
+    # The tail (verbatim messages) is exactly result[2:] (after the 2 synthetic
+    # messages) -- the chunk handed to on_compacted must be everything BEFORE that,
+    # i.e. the original messages that are no longer present verbatim in the result.
+    tail = result[2:]
+    assert received["chunk"] == messages[: len(messages) - len(tail)]
+    assert received["chunk"] != messages  # must not be the whole list
+    assert received["chunk"] != tail  # must not be the kept tail
+
+
+def test_on_compacted_omitted_leaves_behavior_unchanged():
+    messages = []
+    for i in range(20):
+        messages.append(_user(f"task {i}"))
+        messages.append(_assistant_text(f"response {i}"))
+
+    with_none = compact_messages(messages, lambda mm: "SUMMARY", keep_recent=6, on_compacted=None)
+    without_arg = compact_messages(messages, lambda mm: "SUMMARY", keep_recent=6)
+
+    assert with_none == without_arg
+
+
+def test_on_compacted_exception_does_not_break_compaction():
+    messages = []
+    for i in range(20):
+        messages.append(_user(f"task {i}"))
+        messages.append(_assistant_text(f"response {i}"))
+
+    def _boom(chunk):
+        raise RuntimeError("extraction blew up")
+
+    result = compact_messages(messages, lambda mm: "SUMMARY", keep_recent=6, on_compacted=_boom)
+
+    assert result is not messages
+    _assert_strictly_alternating(result)
+
+
+def test_summarize_for_compaction_logs_real_cost_to_usage_store(monkeypatch, tmp_path):
+    from mazu.llm.types import AgentResponse
+    from mazu.usage.store import UsageStore
+
+    fake_response = AgentResponse(
+        stop_reason="end_turn",
+        content=[{"type": "text", "text": "the summary"}],
+        usage={"input_tokens": 1000, "output_tokens": 200},
+    )
+    monkeypatch.setattr("mazu.agent.compaction.run_turn", lambda **kwargs: fake_response)
+
+    usage_store = UsageStore(tmp_path / "usage.db")
+    result = summarize_for_compaction(
+        [_user("old stuff")], model="anthropic:claude-sonnet-5",
+        usage_store=usage_store, session_id="s1",
+    )
+    usage_store.close()
+
+    assert result == "the summary"
+    usage_store = UsageStore(tmp_path / "usage.db")
+    summary = usage_store.summary(command="compaction")
+    usage_store.close()
+    assert summary["total_calls"] == 1
+    assert summary["total_cost"] is not None and summary["total_cost"] > 0
+
+
+def test_extract_memories_on_compaction_inserts_into_memory_store(monkeypatch, tmp_path):
+    from mazu.memory.store import MemoryStore
+
+    monkeypatch.setattr(
+        "mazu.agent.session.extract_memories",
+        lambda messages, model=None: (
+            [{"category": "decision", "title": "Use PostgreSQL", "body": "for concurrency"}],
+            {},
+        ),
+    )
+
+    memory_store = MemoryStore(tmp_path / "memory.db")
+    on_compacted = extract_memories_on_compaction(memory_store, "s1", model=None)
+
+    messages = []
+    for i in range(20):
+        messages.append(_user(f"task {i}"))
+        messages.append(_assistant_text(f"response {i}"))
+    compact_messages(messages, lambda mm: "SUMMARY", keep_recent=6, on_compacted=on_compacted)
+
+    rows = memory_store.search()
+    memory_store.close()
+    assert len(rows) == 1
+    assert rows[0]["title"] == "Use PostgreSQL"
+    assert rows[0]["session_id"] == "s1"
+
+
+def test_extract_memories_on_compaction_returns_none_when_memory_disabled():
+    assert extract_memories_on_compaction(None, "s1", model=None) is None

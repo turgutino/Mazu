@@ -1,15 +1,25 @@
 from pathlib import Path
 
 from mazu.action_log.store import ActionLogStore, record_action
+from mazu.agent.compaction import (
+    DEFAULT_KEEP_RECENT,
+    compact_if_needed,
+    compact_messages,
+    extract_memories_on_compaction,
+    force_compact,
+    summarize_for_compaction,
+)
 from mazu.agent.context import build_system_prompt
 from mazu.agent.interaction import safe_confirm
 from mazu.agent.session import finalize_session
 from mazu.banner import print_banner
+from mazu.chat.store import ChatStore
 from mazu.checkpoint.manager import CheckpointManager
 from mazu.config import router_suggestions_enabled
-from mazu.llm.client import _split_model, default_model, run_turn_stream, summarize_usage
-from mazu.llm.errors import MazuAPIError
+from mazu.llm.client import _split_model, default_model, extract_cost_tokens, run_turn_stream, summarize_usage
+from mazu.llm.errors import MazuAPIError, MazuContextLengthError
 from mazu.llm.pricing import estimate_cost
+from mazu.memory.belief_log import BeliefShadowLogStore
 from mazu.memory.store import MemoryStore
 from mazu.runs.router import suggest_model
 from mazu.runs.store import RunStore
@@ -60,10 +70,23 @@ def run_chat_loop(
     usage_store: UsageStore | None = None,
     action_log_store: ActionLogStore | None = None,
     shell_allowlist: list[str] | None = None,
+    chat_store: ChatStore | None = None,
+    resumed_messages: list[dict] | None = None,
+    belief_log: BeliefShadowLogStore | None = None,
 ) -> None:
-    messages: list[dict] = []
-    system_prompt = None  # built lazily from the first real task, so retrieval has a query
+    messages: list[dict] = list(resumed_messages) if resumed_messages else []
+    # Left None even when resuming: the first new user input still needs its own
+    # system_prompt built (a fresh memory-retrieval query and, if unset, a router
+    # suggestion) exactly like a brand-new session's first message -- resuming
+    # only pre-populates prior conversation turns, not this per-process state.
+    system_prompt = None
     total_cost = 0.0
+    # A resumed chat reuses the SAME session_id (and therefore the same `sessions`
+    # row MemoryStore already has for it, from the original process) --
+    # start_session()'s INSERT would violate that row's primary key and crash.
+    # Identical fix to mazu/agent/autonomous.py's run_autonomous() for `mazu run
+    # --resume`; found live testing `mazu chat --resume` the same way that one was.
+    is_resume = resumed_messages is not None
 
     print_banner()
     provider_name, model_name = _split_model(model or default_model())
@@ -71,7 +94,7 @@ def run_chat_loop(
     cost_trackable = estimate_cost(resolved_model, 0, 0) is not None
     print(f"model: {resolved_model}")
     print(
-        "chat — type your task. Commands: /checkpoint, /rollback [id]. Ctrl+C to quit.\n"
+        "chat — type your task. Commands: /checkpoint, /rollback [id], /compact. Ctrl+C to quit.\n"
     )
     try:
         while True:
@@ -93,8 +116,12 @@ def run_chat_loop(
                     messages[:] = new_messages
                 continue
 
+            if user_input == "/compact":
+                _handle_compact(messages, model, memory_store, usage_store, session_id, belief_log)
+                continue
+
             if system_prompt is None:
-                if memory_store is not None:
+                if memory_store is not None and not is_resume:
                     memory_store.start_session(session_id)
                 system_prompt = build_system_prompt(
                     memory_store, skill_manager, query=user_input, global_memory_store=global_memory_store
@@ -105,6 +132,8 @@ def run_chat_loop(
                     _print_chat_router_suggestion(checkpoint_manager, user_input)
 
             messages.append({"role": "user", "content": user_input})
+            if chat_store is not None:
+                chat_store.append_message(session_id, "user", user_input, model=resolved_model)
             total_cost = _run_until_done(
                 messages,
                 registry,
@@ -117,16 +146,26 @@ def run_chat_loop(
                 total_cost,
                 action_log_store,
                 shell_allowlist,
+                chat_store,
+                memory_store,
+                belief_log,
             )
     finally:
         if memory_store is not None:
-            finalize_session(memory_store, session_id, messages, model=model)
+            finalize_session(
+                memory_store, session_id, messages, model=model, usage_store=usage_store,
+                belief_log=belief_log,
+            )
         if global_memory_store is not None:
             global_memory_store.close()
         if usage_store is not None:
             usage_store.close()
         if action_log_store is not None:
             action_log_store.close()
+        if chat_store is not None:
+            chat_store.close()
+        if belief_log is not None:
+            belief_log.close()
 
 
 def _handle_checkpoint(
@@ -137,6 +176,37 @@ def _handle_checkpoint(
         return
     entry = checkpoint_manager.snapshot(messages, trigger="manual", session_id=session_id)
     print(f"[checkpoint] {entry['id']} saved (commit {entry['git_commit'][:8]})")
+
+
+def _handle_compact(
+    messages: list[dict],
+    model: str | None,
+    memory_store: MemoryStore | None,
+    usage_store: UsageStore | None,
+    session_id: str,
+    belief_log: BeliefShadowLogStore | None = None,
+) -> None:
+    if len(messages) <= DEFAULT_KEEP_RECENT + 1:
+        print("[compact] nothing to compact yet — conversation is already short.")
+        return
+    before = len(messages)
+    on_compacted = extract_memories_on_compaction(
+        memory_store, session_id, model, usage_store=usage_store, belief_log=belief_log
+    )
+    new_messages = compact_messages(
+        messages,
+        lambda mm: summarize_for_compaction(mm, model, usage_store=usage_store, session_id=session_id),
+        keep_recent=DEFAULT_KEEP_RECENT,
+        on_compacted=on_compacted,
+    )
+    if new_messages is messages:
+        print("[compact] nothing safe to cut yet (all messages are within the recent window).")
+        return
+    messages[:] = new_messages
+    print(
+        f"[compact] compacted {before} messages down to {len(messages)} in this turn's context. "
+        f"The full original conversation is still saved — see `mazu chat --list` / `--resume`."
+    )
 
 
 def _handle_rollback(
@@ -179,9 +249,26 @@ def _run_until_done(
     total_cost: float,
     action_log_store: ActionLogStore | None = None,
     shell_allowlist: list[str] | None = None,
+    chat_store: ChatStore | None = None,
+    memory_store: MemoryStore | None = None,
+    belief_log: BeliefShadowLogStore | None = None,
 ) -> float:
     provider_name, model_name = _split_model(resolved_model)
     while True:
+        on_compacted = extract_memories_on_compaction(
+            memory_store, session_id, model, usage_store=usage_store, belief_log=belief_log
+        )
+        new_messages, compacted = compact_if_needed(
+            messages, model, usage_store=usage_store, session_id=session_id, on_compacted=on_compacted
+        )
+        if compacted:
+            messages[:] = new_messages  # mutate in place -- messages is passed in by reference
+            print(
+                f"[context] compacted conversation history to stay within budget "
+                f"({len(messages)} messages remain in this turn's context). Nothing is "
+                f"lost — the full conversation is still saved (`mazu chat --list` / `--resume`)."
+            )
+
         streamed_any_text = False
 
         def _on_delta(chunk: str) -> None:
@@ -193,10 +280,31 @@ def _run_until_done(
             response = run_turn_stream(
                 messages, system_prompt, registry.schemas(), on_delta=_on_delta, model=model
             )
+        except MazuContextLengthError:
+            print(
+                "\n[context] hit the model's context limit — compacting aggressively and "
+                "retrying once. The full conversation remains saved; only what's sent to "
+                "the model just shrank."
+            )
+            on_compacted = extract_memories_on_compaction(
+                memory_store, session_id, model, usage_store=usage_store, belief_log=belief_log
+            )
+            messages[:] = force_compact(
+                messages, model, usage_store=usage_store, session_id=session_id, on_compacted=on_compacted
+            )
+            try:
+                response = run_turn_stream(
+                    messages, system_prompt, registry.schemas(), on_delta=_on_delta, model=model
+                )
+            except MazuAPIError as e:
+                print(f"\n[error] {e}\nReturning to the prompt — try again, or use /rollback.")
+                return total_cost
         except MazuAPIError as e:
             print(f"\n[error] {e}\nReturning to the prompt — try again, or use /rollback.")
             return total_cost
         messages.append({"role": "assistant", "content": response.content})
+        if chat_store is not None:
+            chat_store.append_message(session_id, "assistant", response.content, model=resolved_model)
         # Text was already printed live as it streamed in; usage can only be known
         # once the stream is fully done, so it prints after (not before, like the
         # old non-streaming order) with a newline to close off the streamed line.
@@ -206,14 +314,22 @@ def _run_until_done(
         usage = response.usage
         input_tokens = usage.get("input_tokens", usage.get("prompt_tokens", 0)) or 0
         output_tokens = usage.get("output_tokens", usage.get("completion_tokens", 0)) or 0
-        step_cost = estimate_cost(resolved_model, input_tokens, output_tokens) if cost_trackable else None
+        cost_input_tokens, _, cache_read_tokens, cache_write_tokens = extract_cost_tokens(usage)
+        step_cost = (
+            estimate_cost(
+                resolved_model, cost_input_tokens, output_tokens,
+                cache_read_tokens=cache_read_tokens, cache_write_tokens=cache_write_tokens,
+            )
+            if cost_trackable else None
+        )
         cost_suffix = ""
         if step_cost is not None:
             total_cost += step_cost
             cost_suffix = f" | ~${total_cost:.4f} total"
         if usage_store is not None:
             usage_store.log(
-                "chat", session_id, provider_name, model_name, input_tokens, output_tokens, step_cost
+                "chat", session_id, provider_name, model_name, input_tokens, output_tokens, step_cost,
+                cache_read_tokens=cache_read_tokens or None, cache_write_tokens=cache_write_tokens or None,
             )
         print(f"[usage] {summarize_usage(usage)}{cost_suffix}")
 
@@ -284,3 +400,5 @@ def _run_until_done(
                 }
             )
         messages.append({"role": "user", "content": tool_results})
+        if chat_store is not None:
+            chat_store.append_message(session_id, "user", tool_results, model=resolved_model)
