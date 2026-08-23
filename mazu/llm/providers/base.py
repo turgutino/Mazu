@@ -30,10 +30,12 @@ class Provider(ABC):
     @abstractmethod
     def run_forced_tool(
         self, messages: list[dict], system: str, tool: dict, model: str
-    ) -> dict:
-        """Force the model to call exactly `tool`, returning its parsed input dict.
-        Used for structured extraction (see mazu/memory/extraction.py) where we need a
-        guaranteed-shape result rather than an ordinary agentic turn.
+    ) -> tuple[dict, dict]:
+        """Force the model to call exactly `tool`, returning (parsed input dict, usage
+        dict). Used for structured extraction (see mazu/memory/extraction.py) where we
+        need a guaranteed-shape result rather than an ordinary agentic turn. Usage is
+        returned (not discarded) so callers can log real cost instead of this call's
+        spend being invisible to `mazu usage`.
         """
         ...
 

@@ -1,7 +1,21 @@
 import os
 import platform
+import tempfile
 import tomllib
 from pathlib import Path
+
+from mazu.checkpoint.lock import ReentrantFileLock
+
+
+def _config_lock() -> ReentrantFileLock:
+    # Re-evaluated on every call (never a frozen module-level lock object), for the
+    # same reason config_path() itself is a function: it must track a HOME/
+    # USERPROFILE override made mid-session (tests, or `mazu-web` pointed at a
+    # different project). Keyed on config_path() itself, so `mazu` and `mazu-web`
+    # processes sharing the same ~/.mazu/config.toml serialize against each other too,
+    # not just threads within one process.
+    return ReentrantFileLock(config_path())
+
 
 def config_path() -> Path:
     # A function, not a frozen module-level constant, deliberately -- Path.home()
@@ -118,19 +132,28 @@ def set_config_value(key: str, value: str) -> None:
         raise ValueError(
             f"Unknown config key '{key}'. Known keys: {', '.join(sorted(KNOWN_CONFIG_KEYS))}"
         )
-    config = _read_raw_config()
-    config[key] = value
-    _write_config(config)
+    # Real bug found via live testing: mazu-web runs Flask with threaded=True, so
+    # two concurrent /api/config POSTs (or a `mazu` CLI invocation racing a
+    # mazu-web request) could each read the same on-disk config, add their own
+    # key to their own in-memory copy, then write back -- the second write wins
+    # and silently drops the first key. The lock below serializes the whole
+    # read-modify-write so no update is ever lost, matching the pattern already
+    # used for checkpoints/index.json (see mazu/checkpoint/lock.py).
+    with _config_lock().acquire():
+        config = _read_raw_config()
+        config[key] = value
+        _write_config(config)
 
 
 def unset_config_value(key: str) -> bool:
     """Returns False if the key wasn't set (a no-op, not an error)."""
-    config = _read_raw_config()
-    if key not in config:
-        return False
-    del config[key]
-    _write_config(config)
-    return True
+    with _config_lock().acquire():
+        config = _read_raw_config()
+        if key not in config:
+            return False
+        del config[key]
+        _write_config(config)
+        return True
 
 
 def _toml_quote(value: str) -> str:
@@ -143,10 +166,27 @@ def _write_config(config: dict) -> None:
     # "provider:model" name) -- a minimal string-only TOML writer is enough, and
     # avoids adding a TOML-writing dependency (tomllib, stdlib since 3.11, is
     # read-only) for something this simple.
+    #
+    # Written atomically (temp file in the same directory + os.replace) rather than
+    # path.write_text(), which opens the real file in truncate mode first and writes
+    # second -- a concurrent reader (or a crash) landing in that window used to see a
+    # half-written or fully-empty config.toml. os.replace() is an atomic rename on
+    # both POSIX and Windows, so any reader always sees either the old file or the
+    # complete new one, never something in between. Confirmed live: a burst of
+    # concurrent `mazu-web` config writes previously left config.toml at 0 bytes,
+    # silently losing every previously-set key (API keys, default_model, curator_*).
     path = config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [f"{key} = {_toml_quote(str(value))}" for key, value in config.items()]
-    path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    content = "\n".join(lines) + ("\n" if lines else "")
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=".config-", suffix=".toml.tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.replace(tmp_name, path)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
 
 
 def local_base_url() -> str:

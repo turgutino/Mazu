@@ -81,20 +81,22 @@ def render_transcript(messages: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _extraction_model(main_model: str | None) -> str:
+def extraction_model(main_model: str | None) -> str:
     provider_name, _ = _split_model(main_model or default_model())
     return CHEAP_MODEL_BY_PROVIDER.get(provider_name, CHEAP_MODEL_BY_PROVIDER["anthropic"])
 
 
-def extract_memories(messages: list[dict], model: str | None = None) -> list[dict]:
+def extract_memories(messages: list[dict], model: str | None = None) -> tuple[list[dict], dict]:
     """`model` should be whatever model the main session used, so extraction stays on
     the same provider (and thus the same already-configured API key) rather than
     silently requiring Anthropic regardless of what the user is actually using.
+    Returns (extracted memories, usage dict) -- usage is passed through, not
+    discarded, so callers can log this call's real cost to UsageStore.
     """
     transcript = render_transcript(messages)
     if not transcript.strip():
-        return []
-    result = run_forced_tool(
+        return [], {}
+    result, usage = run_forced_tool(
         messages=[
             {
                 "role": "user",
@@ -103,6 +105,6 @@ def extract_memories(messages: list[dict], model: str | None = None) -> list[dic
         ],
         system=EXTRACTION_SYSTEM,
         tool=RECORD_MEMORIES_TOOL,
-        model=_extraction_model(model),
+        model=extraction_model(model),
     )
-    return result.get("memories", [])
+    return result.get("memories", []), usage

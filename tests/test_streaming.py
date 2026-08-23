@@ -34,8 +34,8 @@ class _NonStreamingProvider(Provider):
             usage={"input_tokens": 1, "output_tokens": 1},
         )
 
-    def run_forced_tool(self, messages, system, tool, model) -> dict:
-        return {}
+    def run_forced_tool(self, messages, system, tool, model) -> tuple[dict, dict]:
+        return {}, {}
 
 
 def test_default_stream_fallback_delivers_full_text_once():

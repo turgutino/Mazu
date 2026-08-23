@@ -3,7 +3,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from mazu.action_log.store import ActionLogStore, record_action
 from mazu.agent.context import build_system_prompt
-from mazu.llm.client import _split_model, run_turn, summarize_usage
+from mazu.llm.client import _split_model, extract_cost_tokens, run_turn, summarize_usage
 from mazu.llm.errors import MazuAPIError
 from mazu.llm.pricing import estimate_cost
 from mazu.tools.registry import ToolRegistry
@@ -127,9 +127,13 @@ def _ask_member(
         # completes" pattern.
         budget_exhausted = False
         if cost_tracker is not None:
-            input_tokens = response.usage.get("input_tokens", response.usage.get("prompt_tokens", 0)) or 0
-            output_tokens = response.usage.get("output_tokens", response.usage.get("completion_tokens", 0)) or 0
-            round_cost = estimate_cost(model, input_tokens, output_tokens)
+            input_tokens, output_tokens, cache_read_tokens, cache_write_tokens = extract_cost_tokens(
+                response.usage
+            )
+            round_cost = estimate_cost(
+                model, input_tokens, output_tokens,
+                cache_read_tokens=cache_read_tokens, cache_write_tokens=cache_write_tokens,
+            )
             budget_exhausted = cost_tracker.add_and_check(round_cost)
 
         if response.stop_reason != "tool_use":
@@ -191,8 +195,15 @@ def _log_usage(
     provider_name, model_name = _split_model(model)
     input_tokens = usage.get("input_tokens", usage.get("prompt_tokens", 0)) or 0
     output_tokens = usage.get("output_tokens", usage.get("completion_tokens", 0)) or 0
-    cost = estimate_cost(model, input_tokens, output_tokens)
-    usage_store.log("council", session_id, provider_name, model_name, input_tokens, output_tokens, cost)
+    cost_input_tokens, _, cache_read_tokens, cache_write_tokens = extract_cost_tokens(usage)
+    cost = estimate_cost(
+        model, cost_input_tokens, output_tokens,
+        cache_read_tokens=cache_read_tokens, cache_write_tokens=cache_write_tokens,
+    )
+    usage_store.log(
+        "council", session_id, provider_name, model_name, input_tokens, output_tokens, cost,
+        cache_read_tokens=cache_read_tokens or None, cache_write_tokens=cache_write_tokens or None,
+    )
 
 
 def run_council(

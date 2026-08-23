@@ -97,6 +97,78 @@ def test_unset_missing_key_returns_false_and_changes_nothing():
     assert list_config() == {"default_model": "anthropic:claude-opus-4-8"}
 
 
+def test_concurrent_set_calls_never_corrupt_or_empty_the_config_file():
+    # Real bug found via live testing: mazu-web runs Flask with threaded=True, so a
+    # burst of near-simultaneous /api/config POSTs used to race on config.toml's
+    # non-atomic, unlocked read-modify-write, leaving the file at 0 bytes and
+    # silently dropping every previously-set key (API keys, default_model,
+    # curator_*). set_config_value now serializes via a file lock and writes
+    # atomically (temp file + os.replace) -- this reproduces the concurrency that
+    # triggered the corruption and asserts it can no longer happen.
+    import concurrent.futures
+
+    from mazu.config import config_path
+
+    def worker(i):
+        set_config_value("default_model", f"deepseek:model-{i}")
+        set_config_value("curator_model", f"anthropic:model-{i}")
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as ex:
+        list(ex.map(worker, range(100)))
+
+    # The file must always be well-formed (non-empty, fully parseable) no matter
+    # how the 200 individual writes interleaved -- os.replace() is atomic, so a
+    # reader landing mid-write always sees either the complete old or complete new
+    # content, never a torn/empty file. This does NOT assert the two keys land
+    # from the SAME worker's pair of calls: the lock only makes each individual
+    # set_config_value() call atomic, not the two separate calls a worker makes
+    # back-to-back, so "default_model" and "curator_model" can legitimately end up
+    # from different workers depending on scheduling -- that's expected, not a bug.
+    assert config_path().stat().st_size > 0
+    values = list_config()
+    assert set(values) == {"default_model", "curator_model"}
+    assert values["default_model"] in {f"deepseek:model-{i}" for i in range(100)}
+    assert values["curator_model"] in {f"anthropic:model-{i}" for i in range(100)}
+
+
+def test_concurrent_set_calls_on_the_same_key_never_lose_an_update():
+    # A stronger, unambiguous proof that the lock actually serializes writes (not
+    # just that the file stays parseable): a classic read-current-value,
+    # increment, write-back counter loses updates under ANY unserialized race, so a
+    # final count that exactly matches the number of increments performed is only
+    # possible if every read-modify-write ran to completion under the lock without
+    # another one interleaved inside it.
+    #
+    # This calls the private _read_raw_config()/_write_config() directly under one
+    # single _config_lock().acquire() per worker, rather than nesting a call to the
+    # public set_config_value() (which acquires its own separate lock instance
+    # internally) -- filelock.FileLock's reentrancy is per-instance, not global
+    # across every FileLock object pointing at the same path from the same thread,
+    # so nesting two separate acquisitions like that would deadlock/timeout, not
+    # actually test anything. This mirrors exactly what set_config_value() itself
+    # does under its own single lock acquisition.
+    import concurrent.futures
+
+    from mazu.config import _config_lock, _read_raw_config, _write_config
+
+    # default_model is reused as the counter field simply because it's already a
+    # KNOWN_CONFIG_KEYS string value; the "increment" is encoded as an integer
+    # suffix (e.g. "deepseek:model-7" means the counter is at 7).
+    def worker(_):
+        with _config_lock().acquire():
+            config = _read_raw_config()
+            current = int(config.get("default_model", "deepseek:model-0").rsplit("-", 1)[1])
+            config["default_model"] = f"deepseek:model-{current + 1}"
+            _write_config(config)
+
+    total_increments = 150
+    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as ex:
+        list(ex.map(worker, range(total_increments)))
+
+    final = list_config()["default_model"]
+    assert final == f"deepseek:model-{total_increments}"
+
+
 def test_set_value_with_special_characters_round_trips_through_toml(tmp_path):
     # Backslashes and quotes must not corrupt the written TOML or break re-parsing.
     tricky = 'sk-"quoted"-and-\\backslash\\-value'

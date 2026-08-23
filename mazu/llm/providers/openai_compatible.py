@@ -242,7 +242,7 @@ class OpenAICompatibleProvider(Provider):
 
     def run_forced_tool(
         self, messages: list[dict], system: str, tool: dict, model: str
-    ) -> dict:
+    ) -> tuple[dict, dict]:
         client = self._get_client()
         import openai
 
@@ -266,7 +266,8 @@ class OpenAICompatibleProvider(Provider):
 
         if not response.choices:
             raise MazuAPIError(f"{self.provider_label} response contained no choices")
+        usage = response.usage.model_dump() if response.usage else {}
         for tool_call in response.choices[0].message.tool_calls or []:
             if tool_call.function.name == tool["name"]:
-                return _parse_tool_arguments(tool_call.function.arguments)
-        return {}
+                return _parse_tool_arguments(tool_call.function.arguments), usage
+        return {}, usage

@@ -32,9 +32,10 @@ def test_finalize_session_skips_exact_duplicate(store: MemoryStore):
     # ...then auto-extraction re-derives the same fact from the transcript.
     with patch(
         "mazu.agent.session.extract_memories",
-        return_value=[
-            {"category": "decision", "title": "Use PostgreSQL", "body": "For concurrency"}
-        ],
+        return_value=(
+            [{"category": "decision", "title": "Use PostgreSQL", "body": "For concurrency"}],
+            {},
+        ),
     ):
         finalize_session(store, "session-1", messages=[{"role": "user", "content": "hi"}])
 
@@ -47,7 +48,7 @@ def test_finalize_session_skips_exact_duplicate(store: MemoryStore):
 def test_finalize_session_inserts_genuinely_new_memory(store: MemoryStore):
     with patch(
         "mazu.agent.session.extract_memories",
-        return_value=[{"category": "convention", "title": "Use snake_case", "body": "for functions"}],
+        return_value=([{"category": "convention", "title": "Use snake_case", "body": "for functions"}], {}),
     ):
         finalize_session(store, "session-1", messages=[{"role": "user", "content": "hi"}])
 

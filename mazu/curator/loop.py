@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 
 from mazu.curator.budget import CuratorBudget
 from mazu.curator.client import run_curator_turn
-from mazu.llm.client import summarize_usage
+from mazu.llm.client import extract_cost_tokens, summarize_usage
 from mazu.llm.pricing import estimate_cost
 from mazu.tools.registry import ToolRegistry
 
@@ -49,9 +49,13 @@ def run_curator_pass(
 
         budget_exhausted = False
         if budget is not None:
-            input_tokens = response.usage.get("input_tokens", response.usage.get("prompt_tokens", 0)) or 0
-            output_tokens = response.usage.get("output_tokens", response.usage.get("completion_tokens", 0)) or 0
-            round_cost = estimate_cost(_current_model_label(), input_tokens, output_tokens)
+            input_tokens, output_tokens, cache_read_tokens, cache_write_tokens = extract_cost_tokens(
+                response.usage
+            )
+            round_cost = estimate_cost(
+                _current_model_label(), input_tokens, output_tokens,
+                cache_read_tokens=cache_read_tokens, cache_write_tokens=cache_write_tokens,
+            )
             budget_exhausted = budget.add_and_check(round_cost)
 
         if response.stop_reason != "tool_use":

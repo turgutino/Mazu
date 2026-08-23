@@ -99,6 +99,37 @@ def test_usage_shows_logged_spend(tmp_path, monkeypatch):
     assert "0.0121" in result.output  # total = 0.0105 + 0.0016
 
 
+def test_usage_shows_cache_token_summary_when_present(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = UsageStore(_usage_db_path())
+    store.log(
+        "chat", "s1", "anthropic", "claude-sonnet-5", 1000, 500, 0.0105,
+        cache_read_tokens=1792, cache_write_tokens=300,
+    )
+    store.close()
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["usage"])
+
+    assert result.exit_code == 0, result.output
+    assert "Prompt caching" in result.output
+    assert "1,792 cache-read" in result.output
+    assert "300 cache-write" in result.output
+
+
+def test_usage_omits_cache_summary_when_no_cache_data(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = UsageStore(_usage_db_path())
+    store.log("chat", "s1", "anthropic", "claude-sonnet-5", 1000, 500, 0.0105)
+    store.close()
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["usage"])
+
+    assert result.exit_code == 0, result.output
+    assert "Prompt caching" not in result.output
+
+
 def test_doctor_reports_problems(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)

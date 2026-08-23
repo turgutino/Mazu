@@ -15,7 +15,7 @@ from mazu.curator.prompts import CURATOR_SYSTEM_PROMPT
 from mazu.curator.signals import is_eligible
 from mazu.curator.store import CuratorStore, new_curator_run_id
 from mazu.curator.tools.registry import build_curator_registry
-from mazu.llm.client import _split_model
+from mazu.llm.client import _split_model, extract_cost_tokens
 from mazu.llm.pricing import estimate_cost
 from mazu.memory.store import MemoryStore
 from mazu.runs.store import RunStore
@@ -176,10 +176,17 @@ def run_curator(
                 for usage in pass_result.usage_list:
                     input_tokens = usage.get("input_tokens", usage.get("prompt_tokens", 0)) or 0
                     output_tokens = usage.get("output_tokens", usage.get("completion_tokens", 0)) or 0
-                    cost = estimate_cost(model, input_tokens, output_tokens)
+                    cost_input_tokens, _, cache_read_tokens, cache_write_tokens = extract_cost_tokens(usage)
+                    cost = estimate_cost(
+                        model, cost_input_tokens, output_tokens,
+                        cache_read_tokens=cache_read_tokens, cache_write_tokens=cache_write_tokens,
+                    )
                     if cost is not None:
                         area_cost += cost
-                    usage_store.log("curator", run_id, provider_name, model_name, input_tokens, output_tokens, cost)
+                    usage_store.log(
+                        "curator", run_id, provider_name, model_name, input_tokens, output_tokens, cost,
+                        cache_read_tokens=cache_read_tokens or None, cache_write_tokens=cache_write_tokens or None,
+                    )
                 total_cost += area_cost
 
                 area_log_count = len([r for r in curator_store.log_for_run(run_id) if r["area"] == area_name])
