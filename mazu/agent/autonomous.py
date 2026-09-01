@@ -78,6 +78,7 @@ def run_autonomous(
     branch_name: str | None = None,
     shared_cost_tracker: "_SharedCostTracker | None" = None,
     belief_log: "BeliefShadowLogStore | None" = None,
+    auto_commit_baseline: bool = False,
 ) -> None:
     # The clean-baseline requirement exists so a real run's checkpoints are
     # meaningful diffs against a known-good starting point. A dry run never writes
@@ -85,11 +86,24 @@ def run_autonomous(
     # for a dirty tree to make ambiguous -- and refusing to preview a plan just
     # because you have other uncommitted work in progress would be actively unhelpful.
     if not dry_run and checkpoint_manager.is_dirty():
+        if not auto_commit_baseline:
+            print(
+                "Working tree has uncommitted changes. `mazu run` requires a clean baseline "
+                "so checkpoints are meaningful. Commit your changes first (or run `mazu checkpoint`), "
+                "or pass --auto-commit-baseline to have `mazu run` commit them for you."
+            )
+            return
         print(
-            "Working tree has uncommitted changes. `mazu run` requires a clean baseline "
-            "so checkpoints are meaningful. Commit your changes first (or run `mazu checkpoint`)."
+            "[baseline] working tree has uncommitted changes -- auto-committing them as a "
+            "starting point (--auto-commit-baseline is on). Disable this flag if you'd rather "
+            "review and commit manually."
         )
-        return
+        if not checkpoint_manager.commit_baseline():
+            print(
+                "[baseline] auto-commit failed (commonly: no git user.name/user.email "
+                "configured). Aborting -- commit manually and retry."
+            )
+            return
 
     # A forked run (origin_checkpoint_id set) is seeded with an origin checkpoint's
     # conversation just like a resume is, but it is NOT a resume: it gets a brand-new

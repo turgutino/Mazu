@@ -46,6 +46,7 @@ dependencies = [
 openai = ["openai>=1.0"]
 gemini = ["google-genai>=1.0"]
 ui = ["textual>=0.60"]
+documents = ["python-docx>=1.0", "pypdf>=4.0", "openpyxl>=3.1", "python-pptx>=1.0"]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
 
 [project.urls]

@@ -22,9 +22,18 @@ class Provider(ABC):
     api_key_env: str
     requires_api_key: bool = True
 
+    # Whether this provider can act on the `effort` parameter below at all
+    # ("low"/"medium"/"high"). False by default -- DeepSeek's and a local server's
+    # APIs have no such knob, so `effort` is silently ignored for them rather than
+    # erroring; only providers that override this to True (currently Anthropic,
+    # Gemini, and OpenAIProvider specifically, not the OpenAICompatibleProvider
+    # base OpenAI shares with DeepSeek/local) actually send it upstream.
+    supports_reasoning_effort: bool = False
+
     @abstractmethod
     def run_turn(
-        self, messages: list[dict], system: str, tools: list[dict], model: str
+        self, messages: list[dict], system: str, tools: list[dict], model: str,
+        effort: str | None = None,
     ) -> AgentResponse: ...
 
     @abstractmethod
@@ -46,6 +55,7 @@ class Provider(ABC):
         tools: list[dict],
         model: str,
         on_delta: Callable[[str], None],
+        effort: str | None = None,
     ) -> AgentResponse:
         """Default fallback for any provider that doesn't override this with real
         token-by-token streaming: runs the ordinary non-streaming call, then delivers
@@ -55,8 +65,24 @@ class Provider(ABC):
         effect) instead of requiring every subclass to implement streaming to remain
         usable at all.
         """
-        response = self.run_turn(messages, system, tools, model)
+        response = self.run_turn(messages, system, tools, model, effort=effort)
         text = "\n".join(b["text"] for b in response.content if b.get("type") == "text")
         if text:
             on_delta(text)
         return response
+
+    def list_models(self) -> list[str]:
+        """Returns the bare model ids this provider's own API currently offers to
+        whichever key is configured (e.g. ["claude-opus-4-8", "claude-sonnet-5", ...]
+        -- no "provider:" prefix, callers that need one add it themselves). This is a
+        LIVE catalog call, not the static per-model capability table in
+        mazu/llm/capabilities.py -- it exists so a model picker can be populated from
+        what the account can actually use today instead of a hardcoded single default
+        per provider going stale as new models ship.
+
+        Raises the same MazuAuthError/MazuAPIError family as run_turn on a bad or
+        missing key -- deliberately not swallowed into an empty list, since an empty
+        list would look identical to "this account genuinely has zero models" instead
+        of "your key is wrong."
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not support live model listing")

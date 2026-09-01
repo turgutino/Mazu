@@ -435,6 +435,15 @@ def config_unset(key: str) -> None:
     help="Permanently delete a past chat session's saved history and exit. "
     "See `mazu chat --list` for session ids.",
 )
+@click.option(
+    "--auto-approve",
+    is_flag=True,
+    default=False,
+    help="Run destructive tools (shell commands, file/skill deletion) without asking for "
+    "confirmation each time. The safety denylist and --shell-allowlist still apply on top "
+    "regardless -- this only skips the interactive y/N prompt. Off by default; can also be "
+    "toggled mid-session with /auto.",
+)
 def chat(
     model: str | None,
     shell_allowlist: str | None,
@@ -442,6 +451,7 @@ def chat(
     list_sessions: bool,
     as_json: bool,
     delete_session_id: str | None,
+    auto_approve: bool,
 ) -> None:
     """Start an interactive chat session in the current directory."""
     root = Path.cwd()
@@ -516,6 +526,7 @@ def chat(
         resumed_messages=resumed_messages,
         shell_allowlist=_parse_shell_allowlist(shell_allowlist),
         belief_log=belief_log,
+        auto_approve=auto_approve,
     )
 
 
@@ -590,6 +601,15 @@ def chat(
     "with --from-checkpoint.",
 )
 @click.option("--model", default=None, help="Override the model.")
+@click.option(
+    "--auto-commit-baseline",
+    is_flag=True,
+    default=False,
+    help="If the working tree has uncommitted changes, commit them as a plain git commit "
+    "(not a full Mazu checkpoint) before starting, instead of refusing to run. Off by "
+    "default -- an unattended run silently committing your in-progress changes is "
+    "surprising unless you've opted in.",
+)
 def run(
     task: str | None,
     max_steps: int,
@@ -603,6 +623,7 @@ def run(
     from_checkpoint_id: str | None,
     fork_branch_name: str | None,
     model: str | None,
+    auto_commit_baseline: bool,
 ) -> None:
     """Run a task autonomously (multi-step, unattended), checkpointing along the way."""
     root = Path.cwd()
@@ -726,6 +747,7 @@ def run(
         parent_run_id=parent_run_id,
         branch_name=branch_name,
         belief_log=belief_log,
+        auto_commit_baseline=auto_commit_baseline,
     )
 
 

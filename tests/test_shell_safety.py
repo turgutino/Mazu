@@ -220,3 +220,51 @@ def test_shell_tool_handles_non_ascii_subprocess_output_without_crashing(tmp_pat
     assert not result.is_error
     assert chr(0x1F600) in result.content
     assert chr(305) in result.content
+
+
+def test_shell_tool_still_returns_on_time_for_an_ordinary_timeout(tmp_path: Path):
+    """Baseline the new Popen-based implementation against the same timeout
+    contract the old subprocess.run one had: a plain (non-piped) command that
+    outlives its timeout still gets reported cleanly and quickly.
+    """
+    import time
+
+    tool = make_shell_tool(tmp_path, timeout=1, dry_run=False)
+    start = time.monotonic()
+    result = tool.handler({"command": 'python -c "import time; time.sleep(30)"'})
+    elapsed = time.monotonic() - start
+
+    assert result.is_error
+    assert "timed out after 1s" in result.content
+    assert elapsed < 15, f"run_shell took {elapsed:.1f}s to report a 1s timeout -- it's not actually killing the process"
+
+
+def test_shell_tool_kills_a_stuck_piped_command_within_the_timeout(tmp_path: Path):
+    """Real bug found via live testing: a piped command (`a | b`) hung a chat
+    turn for 3+ minutes with subprocess.run's own `timeout=` never firing --
+    on Windows, shell=True always routes through cmd.exe, and killing cmd.exe
+    alone on timeout doesn't reliably kill later pipeline stages, so
+    communicate() kept waiting for EOF on a pipe a still-alive process held
+    open. This reproduces that exact shape (a producer that sleeps without
+    writing, piped into a consumer that blocks reading stdin) and asserts the
+    fix (_force_kill_process_tree via taskkill /T on Windows / killpg on POSIX)
+    actually terminates BOTH stages within the timeout instead of hanging for
+    the full 30s the producer would otherwise sleep.
+    """
+    import time
+
+    tool = make_shell_tool(tmp_path, timeout=2, dry_run=False)
+    command = (
+        'python -c "import time; time.sleep(30)" | python -c "import sys; sys.stdin.read()"'
+    )
+    start = time.monotonic()
+    result = tool.handler({"command": command})
+    elapsed = time.monotonic() - start
+
+    assert result.is_error
+    assert "timed out after 2s" in result.content
+    # The real regression: without the process-tree kill, this would block for
+    # the full 30s the producer sleeps (or longer). A generous margin above the
+    # 2s timeout (taskkill/process teardown overhead) still proves it was
+    # actually killed, not merely outlasted.
+    assert elapsed < 15, f"run_shell took {elapsed:.1f}s to kill a stuck pipe -- the process tree wasn't actually terminated"

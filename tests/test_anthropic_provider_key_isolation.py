@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from mazu.llm.errors import MazuAuthError
-from mazu.llm.providers.anthropic_provider import AnthropicProvider
+from mazu.llm.providers.anthropic_provider import _REQUEST_TIMEOUT_SECONDS, AnthropicProvider
 
 
 def test_retargeted_api_key_env_is_actually_used(monkeypatch):
@@ -27,7 +27,7 @@ def test_retargeted_api_key_env_is_actually_used(monkeypatch):
     with patch("anthropic.Anthropic") as mock_anthropic:
         provider._get_client()
 
-    mock_anthropic.assert_called_once_with(api_key="sk-curator-key")
+    mock_anthropic.assert_called_once_with(api_key="sk-curator-key", timeout=_REQUEST_TIMEOUT_SECONDS)
 
 
 def test_default_behavior_unchanged_when_using_the_standard_env_var(monkeypatch):
@@ -38,7 +38,7 @@ def test_default_behavior_unchanged_when_using_the_standard_env_var(monkeypatch)
     with patch("anthropic.Anthropic") as mock_anthropic:
         provider._get_client()
 
-    mock_anthropic.assert_called_once_with(api_key="sk-main-key")
+    mock_anthropic.assert_called_once_with(api_key="sk-main-key", timeout=_REQUEST_TIMEOUT_SECONDS)
 
 
 def test_retargeted_env_var_does_not_leak_the_main_key(monkeypatch):
@@ -53,7 +53,7 @@ def test_retargeted_env_var_does_not_leak_the_main_key(monkeypatch):
     with patch("anthropic.Anthropic") as mock_anthropic:
         provider._get_client()
 
-    mock_anthropic.assert_called_once_with(api_key="sk-curator-key")
+    mock_anthropic.assert_called_once_with(api_key="sk-curator-key", timeout=_REQUEST_TIMEOUT_SECONDS)
 
 
 def test_non_ascii_key_still_raises_clean_error(monkeypatch):
@@ -73,4 +73,4 @@ def test_missing_key_falls_back_to_none_not_a_crash(monkeypatch):
     with patch("anthropic.Anthropic") as mock_anthropic:
         provider._get_client()
 
-    mock_anthropic.assert_called_once_with(api_key=None)
+    mock_anthropic.assert_called_once_with(api_key=None, timeout=_REQUEST_TIMEOUT_SECONDS)

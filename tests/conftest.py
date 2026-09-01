@@ -27,3 +27,17 @@ def _isolate_curator_env(monkeypatch):
     import mazu.curator.client as _curator_client_module
 
     _curator_client_module._providers.clear()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_config_injection_tracking():
+    """mazu.config._last_injected is process-lifetime state (see its own comment)
+    so a value one test's load_config() call injects must not be mistaken by a
+    later test for something it injected itself -- that would make
+    test_load_config_never_overwrites_an_existing_env_var's manually-set env var
+    look like a stale injection of ours and get silently overwritten."""
+    import mazu.config as _config_module
+
+    _config_module._last_injected.clear()
+    yield
+    _config_module._last_injected.clear()

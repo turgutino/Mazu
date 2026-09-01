@@ -27,7 +27,7 @@ class _NonStreamingProvider(Provider):
 
     api_key_env = "FAKE_API_KEY"
 
-    def run_turn(self, messages, system, tools, model) -> AgentResponse:
+    def run_turn(self, messages, system, tools, model, effort=None) -> AgentResponse:
         return AgentResponse(
             stop_reason="end_turn",
             content=[{"type": "text", "text": "full response text"}],
@@ -52,7 +52,7 @@ def test_default_stream_fallback_delivers_full_text_once():
 
 def test_default_stream_fallback_skips_on_delta_when_no_text():
     class _ToolOnlyProvider(_NonStreamingProvider):
-        def run_turn(self, messages, system, tools, model):
+        def run_turn(self, messages, system, tools, model, effort=None):
             return AgentResponse(
                 stop_reason="tool_use",
                 content=[{"type": "tool_use", "id": "1", "name": "x", "input": {}}],
@@ -282,7 +282,7 @@ def test_client_run_turn_stream_does_not_retry_on_transient_error(monkeypatch):
     monkeypatch.setenv("MAZU_MODEL", "deepseek:deepseek-chat")
     call_count = {"n": 0}
 
-    def _fake_run_turn_stream(self, messages, system, tools, model, on_delta):
+    def _fake_run_turn_stream(self, messages, system, tools, model, on_delta, effort=None):
         call_count["n"] += 1
         on_delta("partial output before failure")
         raise MazuTransientError("connection dropped mid-stream")

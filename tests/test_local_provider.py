@@ -47,7 +47,7 @@ def test_get_client_uses_placeholder_key_when_unset(monkeypatch):
     captured = {}
 
     class FakeOpenAI:
-        def __init__(self, api_key, base_url):
+        def __init__(self, api_key, base_url, timeout=None):
             captured["api_key"] = api_key
             captured["base_url"] = base_url
 
@@ -67,7 +67,7 @@ def test_get_client_uses_real_value_when_set(monkeypatch):
     captured = {}
 
     class FakeOpenAI:
-        def __init__(self, api_key, base_url):
+        def __init__(self, api_key, base_url, timeout=None):
             captured["api_key"] = api_key
 
     import openai
@@ -120,7 +120,7 @@ def test_base_url_resolved_lazily_on_first_get_client(monkeypatch):
     monkeypatch.setenv("MAZU_LOCAL_BASE_URL", "http://localhost:9999/v1")
 
     class FakeOpenAI:
-        def __init__(self, api_key, base_url):
+        def __init__(self, api_key, base_url, timeout=None):
             pass
 
     import openai

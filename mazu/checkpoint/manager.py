@@ -67,6 +67,19 @@ class CheckpointManager:
         result = _git(self.root, ["status", "--porcelain"])
         return bool(result.stdout.strip())
 
+    def commit_baseline(self, message: str = "mazu: auto-committed baseline before autonomous run") -> bool:
+        """A plain git commit of whatever's currently on disk -- not a full Mazu
+        checkpoint (no memory.db/skills/conversation snapshot, no checkpoints/index.json
+        entry) -- just enough to make is_dirty() false so `mazu run`'s clean-baseline
+        gate passes. Returns False (without raising) if the commit itself fails (e.g.
+        no git user.name/user.email configured) -- callers should treat that as the
+        tree still being unusable for a run, not crash the whole process over it.
+        """
+        self.ensure_git_repo()
+        _git(self.root, ["add", "-A"])
+        result = _git(self.root, ["commit", "-m", message])
+        return result.returncode == 0
+
     def _current_branch(self) -> str:
         return _git(self.root, ["rev-parse", "--abbrev-ref", "HEAD"]).stdout.strip()
 

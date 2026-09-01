@@ -78,6 +78,24 @@ def _resolve_provider(model: str | None) -> tuple[str, object, str]:
     return provider_name, provider, model_name
 
 
+def default_effort() -> str | None:
+    """Resolution order: MAZU_REASONING_EFFORT env var, then the `reasoning_effort`
+    config value set via `mazu config set` / the mazu-web Config page -- None
+    (Mazu sends nothing, leaving each model's own default thinking behavior
+    untouched) if neither is set. Unlike default_model(), there is no
+    auto-detection fallback -- there's no sensible provider-derived guess for how
+    much a model should "think." A provider that doesn't support this at all
+    (DeepSeek, local) just ignores whatever this resolves to -- see
+    Provider.supports_reasoning_effort.
+    """
+    env_value = os.environ.get("MAZU_REASONING_EFFORT")
+    if env_value:
+        return env_value
+    from mazu.config import get_reasoning_effort
+
+    return get_reasoning_effort()
+
+
 def run_turn(
     messages: list[dict],
     system: str,
@@ -92,7 +110,8 @@ def run_turn(
     the caller to handle.
     """
     _, provider, model_name = _resolve_provider(model)
-    return with_retry(lambda: provider.run_turn(messages, system, tools, model_name))
+    effort = default_effort()
+    return with_retry(lambda: provider.run_turn(messages, system, tools, model_name, effort=effort))
 
 
 def run_turn_stream(
@@ -111,7 +130,8 @@ def run_turn_stream(
     the caller's existing error handling shows one clean message instead.
     """
     _, provider, model_name = _resolve_provider(model)
-    return provider.run_turn_stream(messages, system, tools, model_name, on_delta)
+    effort = default_effort()
+    return provider.run_turn_stream(messages, system, tools, model_name, on_delta, effort=effort)
 
 
 def run_forced_tool(
@@ -125,6 +145,37 @@ def run_forced_tool(
     """
     _, provider, model_name = _resolve_provider(model)
     return with_retry(lambda: provider.run_forced_tool(messages, system, tool, model_name))
+
+
+def list_models(provider_name: str) -> list[str]:
+    """Live model catalog for `provider_name` (e.g. "deepseek"), fetched from that
+    provider's own API using whichever key is currently configured -- see
+    Provider.list_models() for why this is a live call, not the static
+    mazu/llm/capabilities.py table. Deliberately not wrapped in with_retry(): a
+    bad/missing key should surface immediately as a clear MazuAuthError, not be
+    retried as if it might transiently fix itself.
+
+    The missing-key check below is deliberately done HERE rather than left to each
+    provider's own client construction: AnthropicProvider's _get_client() passes a
+    missing key through to the SDK as `None` on purpose (see
+    test_anthropic_provider_key_isolation.py's test_missing_key_falls_back_to_none_
+    not_a_crash) so the SDK's own env fallback still has a chance to work -- real
+    bug found via live testing (mazu-web's new model-picker endpoint) is that this
+    means a genuinely missing key surfaces as a raw SDK TypeError deep in header
+    construction (not an anthropic.AnthropicError, so run_turn's own error mapping
+    never sees it either) instead of a clean, catchable error. Checking here catches
+    it before any provider-specific client is ever built, for every provider.
+    """
+    from mazu.llm.errors import MazuAuthError
+
+    provider = _PROVIDERS.get(provider_name)
+    if provider is None:
+        raise ValueError(f"Unknown provider '{provider_name}'. Available: {', '.join(_PROVIDERS)}")
+    if provider.requires_api_key and not os.environ.get(provider.api_key_env):
+        raise MazuAuthError(
+            f"{provider.api_key_env} is not set. Set it to list {provider_name}: models."
+        )
+    return provider.list_models()
 
 
 def extract_cache_tokens(usage: dict) -> tuple[int, int]:

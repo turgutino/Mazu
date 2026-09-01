@@ -1,6 +1,128 @@
+import os
+
 from mazu import __version__ as _MAZU_VERSION
 
-SYSTEM_PROMPT = f"""You are Mazu, an autonomous coding agent working directly in the user's \
+
+def _network_privacy_paragraph() -> str:
+    """Split out of the base prompt (and re-evaluated on every call, not frozen at
+    import time) because its correct content depends on which surface is actually
+    running this conversation -- terminal `mazu chat`/`mazu run`/`mazu council` truly
+    have no server involved, but mazu-web (a separate, optional package) IS a local
+    Flask server, and the two previous versions of this paragraph flatly asserted
+    "there is no Mazu-run server" unconditionally. That was false whenever mazu-web
+    was the surface, and caused a real, observed failure: a user told the mazu-web
+    chat "I started mazu run" (meaning the Run tab of this same app) and the model,
+    having just been told no server exists, had no way to connect that to itself and
+    fabricated a story about a separate, parallel desktop application instead of
+    saying "that's this same app's Run tab."
+
+    mazu-web sets MAZU_WEB_SURFACE=1 once, at app creation (see mazu_web/app.py's
+    create_app()) -- read here via a plain env var rather than threading a new
+    parameter through build_system_prompt()'s four call sites (chat, run, council,
+    and mazu-web's own wrappers around each) since none of those call sites
+    currently have (or need) any other reason to know which surface invoked them.
+    """
+    if os.environ.get("MAZU_WEB_SURFACE") == "1":
+        return (
+            "If asked about your capabilities, limitations, or privacy: this conversation is "
+            "being served through mazu-web, a separate, optional local browser UI for Mazu. It "
+            "runs as a small Flask server ON THE USER'S OWN MACHINE, bound to 127.0.0.1 by "
+            "default with no authentication -- it is not exposed to the internet unless the user "
+            "explicitly changed its --host flag, and Mazu itself operates no cloud service of any "
+            "kind. Your only network activity beyond that local server is the model API call "
+            "itself (to whichever provider is configured) and one cheap end-of-session call, on "
+            "that same provider, to extract memories from the transcript -- nothing else leaves "
+            "the user's machine. You have no access to the internet or live browsing; your "
+            "knowledge of the current project comes only from your tools "
+            "(read_file/list_dir/glob_files/run_shell) and your memory/skill stores. Your memory "
+            "is limited to this project's local store and the separate cross-project "
+            "`user_preference` store -- you have no visibility into unrelated conversations, "
+            "other machines, or other tools.\n\n"
+            "mazu-web's other tabs -- Run, Explore, Council, Checkpoints, Memory, Skills, "
+            "Curator, Runs, Router, Usage, Log, Models, Doctor, Config -- are NOT separate "
+            "products or other agents: each one is the same underlying Mazu command you'd type "
+            "in a terminal (Run = `mazu run`, Explore = `mazu explore`, Council = `mazu council`, "
+            "etc.), just triggered by a browser button in this same app instead of a command "
+            "line. There is exactly one Mazu here, not two running in parallel. If the user "
+            "mentions having \"run mazu run\", started a Run, or refers to something from another "
+            "tab, they mean this same mazu-web instance -- never guess at, or invent, a separate "
+            "desktop application, a different install, or a second agent instance. If you're not "
+            "sure what they mean by a Mazu feature you don't recognize, say so plainly instead of "
+            "constructing an explanation that sounds plausible but isn't grounded in anything you "
+            "actually know."
+        )
+    return (
+        "If asked about your capabilities, limitations, or privacy: your only network activity is "
+        "the model API call itself (to whichever provider is configured) and one cheap "
+        "end-of-session call, on that same provider, to extract memories from the transcript -- "
+        "nothing else leaves the user's machine, and there is no server involved (this is a "
+        "terminal session). You have no access to the internet or live browsing; your knowledge "
+        "of the current project comes only from your tools "
+        "(read_file/list_dir/glob_files/run_shell) and your memory/skill stores. Your memory is "
+        "limited to this project's local store and the separate cross-project `user_preference` "
+        "store -- you have no visibility into unrelated conversations, other machines, or other "
+        "tools.\n\n"
+        "Separately, an optional companion package called mazu-web exists (a local browser UI for "
+        "this same command surface -- chat/run/explore/council/etc., each just a different way to "
+        "reach the same Mazu operations this session itself uses) but is not installed or running "
+        "as part of this terminal session. If the user asks how to open or use it, tell them: "
+        "`pip install mazu-web`, then run `mazu-web` from their project directory."
+    )
+
+
+# Each key is a lowercase phrase to look for in the user's own message text; the
+# value is the mazu-web tab name it maps to. Deliberately just the CLI command name
+# (not e.g. "mazu run" -> "the Run tab, which is..." full prose) -- this note stays
+# short since it's injected into every matching turn, not just the first.
+_OWN_FEATURE_TRIGGERS: dict[str, str] = {
+    "mazu chat": "Chat",
+    "mazu run": "Run",
+    "mazu explore": "Explore",
+    "mazu council": "Council",
+    "mazu curator": "Curator",
+    "mazu checkpoint": "Checkpoints",
+}
+
+
+def own_feature_grounding_note(query: str) -> str:
+    """A real, observed failure mode this exists to catch: the base system prompt
+    above already explains (in prose, once) that mazu-web's tabs ARE `mazu run`/
+    `mazu explore`/etc., not a separate program -- but a chat model asked to recall
+    one paragraph out of a long system prompt doesn't always act on it (LLM
+    instruction-following isn't 100% reliable, especially on a cheaper model), and
+    can fabricate a "you must mean a separate desktop app" explanation instead. This
+    is a second, narrower line of defense: a short, deterministic reminder added
+    only to turns whose own message actually mentions one of these commands, so the
+    fact is freshly restated right when it's relevant rather than relying purely on
+    the model recalling it from earlier in a long prompt.
+
+    Returns "" (nothing to add) outside mazu-web (MAZU_WEB_SURFACE unset) -- in a
+    terminal session there is no "which tab" question to ground, since there are no
+    tabs. Cheap regardless: this is a handful of extra tokens folded into the same
+    request already being made, never an extra API call on its own.
+    """
+    if os.environ.get("MAZU_WEB_SURFACE") != "1":
+        return ""
+    lowered = query.lower()
+    matched_tabs = sorted({tab for phrase, tab in _OWN_FEATURE_TRIGGERS.items() if phrase in lowered})
+    if not matched_tabs:
+        return ""
+    return (
+        f"[Grounding note: the user's message below mentions {', '.join(matched_tabs)} -- "
+        "that's a tab of THIS SAME mazu-web app serving this very conversation, not a "
+        "separate program, install, or agent. Answer with that fact, not a guess.]"
+    )
+
+
+def build_base_system_prompt() -> str:
+    """Re-built on every call (not a frozen module-level constant) so it always
+    reflects the current MAZU_WEB_SURFACE env var -- see
+    _network_privacy_paragraph()'s docstring for why that matters. The one caller,
+    build_system_prompt() in mazu/agent/context.py, calls this fresh each time it
+    assembles a system prompt anyway, so there's no meaningful cost to not caching
+    this.
+    """
+    return f"""You are Mazu, an autonomous coding agent working directly in the user's \
 project directory.
 
 You have tools to read, write, and edit files, list/glob the directory, and run shell \
@@ -17,17 +139,13 @@ which model family is answering (e.g. you are a Claude model), you can say so as
 technical fact about the API call — that's not the same as claiming that provider built Mazu, \
 so it's fine to mention if asked directly.
 
-If asked about your capabilities, limitations, or privacy: your only network activity is the \
-model API call itself (to whichever provider is configured) and one cheap end-of-session call, \
-on that same provider, to extract memories from the transcript — nothing else leaves the \
-user's machine, and there is no Mazu-run server. You have no access to the internet or live \
-browsing; your knowledge of the current project comes only from your tools \
-(read_file/list_dir/glob_files/run_shell) and your memory/skill stores. Your memory is limited \
-to this project's local store and the separate cross-project `user_preference` store — you \
-have no visibility into unrelated conversations, other machines, or other tools.
+{_network_privacy_paragraph()}
 
 Never invent a company, origin story, capability, or limitation you're unsure about — say you \
-don't know instead of guessing.
+don't know instead of guessing. This applies just as much to Mazu's own features and surfaces \
+(mazu-web's tabs, CLI commands, config options) as to anything else: if the user references a \
+Mazu feature, tab, or behavior you don't actually have grounded information about above, say \
+you're not sure rather than fabricating a plausible-sounding explanation.
 
 Guidelines:
 - Prefer editing existing files (edit_file) over rewriting them from scratch (write_file).

@@ -24,10 +24,23 @@ def _to_openai_tools(tools: list[dict]) -> list[dict] | None:
     ]
 
 
+def _image_block_to_openai_part(block: dict) -> dict:
+    """Anthropic's canonical `{"type": "image", "source": {"type": "base64",
+    "media_type": ..., "data": ...}}` -> OpenAI's `image_url` content part, which
+    accepts a base64 image inline as a `data:` URI (documented OpenAI vision
+    input format -- no separate upload step needed for this shape).
+    """
+    source = block.get("source", {})
+    media_type = source.get("media_type", "image/png")
+    data = source.get("data", "")
+    return {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{data}"}}
+
+
 def _to_openai_messages(system: str, messages: list[dict]) -> list[dict]:
     """Translate the canonical Anthropic-shaped message list into OpenAI's chat format.
     Anthropic tool_result blocks (embedded in a user turn) become their own `tool`-role
-    messages; Anthropic tool_use blocks (embedded in an assistant turn) become `tool_calls`.
+    messages; Anthropic tool_use blocks (embedded in an assistant turn) become `tool_calls`;
+    image blocks become `image_url` parts alongside any text parts in the same user turn.
     """
     openai_messages: list[dict] = [{"role": "system", "content": system}]
     for msg in messages:
@@ -52,9 +65,18 @@ def _to_openai_messages(system: str, messages: list[dict]) -> list[dict]:
             if tool_calls:
                 entry["tool_calls"] = tool_calls
             openai_messages.append(entry)
-        else:  # user turn: may contain tool_result blocks
+        else:
+            # user turn: may contain tool_result blocks (each becomes its own
+            # `tool`-role message, in source order relative to the surrounding
+            # text/image parts) and text/image blocks, which are collected into
+            # ONE user message so an image and its caption stay in the same
+            # turn -- OpenAI's vision input requires that shape; splitting them
+            # into separate messages the way the old text-only code did would
+            # silently break the image-to-caption association.
+            parts: list[dict] = []
             for block in content:
-                if block.get("type") == "tool_result":
+                block_type = block.get("type")
+                if block_type == "tool_result":
                     openai_messages.append(
                         {
                             "role": "tool",
@@ -62,8 +84,18 @@ def _to_openai_messages(system: str, messages: list[dict]) -> list[dict]:
                             "content": str(block.get("content", "")),
                         }
                     )
-                elif block.get("type") == "text":
-                    openai_messages.append({"role": "user", "content": block["text"]})
+                elif block_type == "text":
+                    parts.append({"type": "text", "text": block["text"]})
+                elif block_type == "image":
+                    parts.append(_image_block_to_openai_part(block))
+            if parts:
+                # A single plain-text part keeps the old bare-string shape --
+                # some OpenAI-compatible servers are stricter about accepting
+                # array content for pure-text messages than the real OpenAI API.
+                if len(parts) == 1 and parts[0]["type"] == "text":
+                    openai_messages.append({"role": "user", "content": parts[0]["text"]})
+                else:
+                    openai_messages.append({"role": "user", "content": parts})
     return openai_messages
 
 
@@ -80,6 +112,18 @@ class OpenAICompatibleProvider(Provider):
     just fix a base_url and which env var holds the API key; the request/response
     handling and message/tool conversion are shared.
     """
+
+    # A class attribute (not a module constant) so LocalProvider can override it
+    # with a longer value instead of sharing one number -- a cloud request to
+    # deepseek/etc and a request to a CPU-bound local model on the user's own
+    # machine have very different realistic response times. Exists because the SDK's own
+    # default timeout (several minutes) previously left a stalled request hanging
+    # with no recovery and no feedback: caught live via a mazu-web chat session
+    # (routed through this provider for deepseek: models) stuck unresponsive for
+    # 8+ minutes. 120s is generous for a single request/streamed-chunk gap on a
+    # cloud API while still failing fast enough that MazuAPIError's existing
+    # retry/error-surfacing path (mazu/llm/retry.py) gets a chance to run at all.
+    REQUEST_TIMEOUT_SECONDS = 120.0
 
     def __init__(
         self,
@@ -132,11 +176,24 @@ class OpenAICompatibleProvider(Provider):
                 # the env var (e.g. a local proxy that actually checks a token),
                 # their real value is used instead.
                 api_key = os.environ.get(self.api_key_env) or "not-needed"
-            self._client = OpenAI(api_key=api_key, base_url=self.base_url)
+            self._client = OpenAI(api_key=api_key, base_url=self.base_url, timeout=self.REQUEST_TIMEOUT_SECONDS)
         return self._client
 
+    def _effort_kwargs(self, effort: str | None) -> dict:
+        """Only OpenAIProvider overrides `supports_reasoning_effort` to True --
+        DeepSeek's and a local server's chat-completions endpoints have no such
+        parameter, so `effort` is silently dropped for them rather than sent
+        upstream (where an OpenAI-compatible server might reject an unrecognized
+        field, or a lenient one would just ignore it -- not worth relying on
+        either behavior when simply not sending it is unambiguous).
+        """
+        if effort and self.supports_reasoning_effort:
+            return {"reasoning_effort": effort}
+        return {}
+
     def run_turn(
-        self, messages: list[dict], system: str, tools: list[dict], model: str
+        self, messages: list[dict], system: str, tools: list[dict], model: str,
+        effort: str | None = None,
     ) -> AgentResponse:
         # _get_client() must run first: it's the one that turns a missing `openai`
         # package into a clean MazuAuthError. Importing it unconditionally here would
@@ -149,6 +206,7 @@ class OpenAICompatibleProvider(Provider):
                 model=model,
                 messages=_to_openai_messages(system, messages),
                 tools=_to_openai_tools(tools),
+                **self._effort_kwargs(effort),
             )
         except openai.OpenAIError as e:
             raise classify_sdk_error(openai, e) from e
@@ -181,6 +239,7 @@ class OpenAICompatibleProvider(Provider):
         tools: list[dict],
         model: str,
         on_delta: Callable[[str], None],
+        effort: str | None = None,
     ) -> AgentResponse:
         client = self._get_client()
         import openai
@@ -199,6 +258,7 @@ class OpenAICompatibleProvider(Provider):
                 tools=_to_openai_tools(tools),
                 stream=True,
                 stream_options={"include_usage": True},
+                **self._effort_kwargs(effort),
             )
             for chunk in stream:
                 if chunk.usage is not None:
@@ -271,3 +331,23 @@ class OpenAICompatibleProvider(Provider):
             if tool_call.function.name == tool["name"]:
                 return _parse_tool_arguments(tool_call.function.arguments), usage
         return {}, usage
+
+    def _is_chat_model(self, model_id: str) -> bool:
+        """Whether a model id from list_models()'s raw catalog should be offered as
+        a chat model. True for everything by default -- DeepSeek's and a local
+        server's own catalogs are already small and chat-only, so no filtering is
+        needed there. OpenAIProvider overrides this: OpenAI's full /v1/models
+        response also mixes in embeddings, TTS, image, moderation, and legacy
+        completion-only models alongside genuine chat models.
+        """
+        return True
+
+    def list_models(self) -> list[str]:
+        client = self._get_client()
+        import openai
+
+        try:
+            response = client.models.list()
+        except openai.OpenAIError as e:
+            raise classify_sdk_error(openai, e) from e
+        return sorted(m.id for m in response.data if self._is_chat_model(m.id))

@@ -14,6 +14,17 @@ from mazu.llm.types import AgentResponse
 # can legitimately need a long response (a big diff, a long explanation).
 FORCED_TOOL_MAX_TOKENS = 1024
 
+# The Anthropic SDK's own default (10 minutes) is long enough that a genuinely
+# stalled connection -- not a slow-but-progressing generation, which streaming
+# chunks reset this against -- leaves a chat/run/council turn hung with zero
+# feedback and no way to recover short of restarting the whole mazu-web process.
+# Caught live: a mazu-web chat session sat unresponsive for 8+ minutes with no
+# self-recovery. 120s is generous for a single request/chunk gap while still
+# failing fast enough that MazuAPIError's existing retry/error-surfacing path
+# (see mazu/llm/retry.py) actually gets a chance to run instead of the call never
+# returning at all.
+_REQUEST_TIMEOUT_SECONDS = 120.0
+
 
 def _max_output_tokens(model: str) -> int:
     """Anthropic's `max_tokens` request field is required and hard-caps a single
@@ -52,6 +63,19 @@ def _with_cache_control(message: dict) -> dict:
     return {**message, "content": new_content}
 
 
+def _effort_kwargs(effort: str | None) -> dict:
+    """Mazu's own three-level vocabulary ("low"/"medium"/"high") mapped onto
+    current-generation Claude models' `thinking`/`output_config.effort` request
+    shape (verified against the installed anthropic SDK and the claude-api skill's
+    Thinking & Effort reference -- `budget_tokens` is removed/rejected on these
+    models, `output_config.effort` is the current GA replacement). Returns {} when
+    `effort` is unset, leaving the model's own default thinking behavior untouched.
+    """
+    if not effort:
+        return {}
+    return {"thinking": {"type": "adaptive"}, "output_config": {"effort": effort}}
+
+
 def _with_tool_cache_control(tools: list[dict]) -> list[dict]:
     """Returns a NEW tools list with a cache_control breakpoint on the last tool
     definition -- caches the entire (large, static-per-run) tool schema block.
@@ -63,6 +87,8 @@ def _with_tool_cache_control(tools: list[dict]) -> list[dict]:
 
 
 class AnthropicProvider(Provider):
+    supports_reasoning_effort = True
+
     def __init__(self):
         self._client = None
         self.api_key_env = "ANTHROPIC_API_KEY"
@@ -82,11 +108,12 @@ class AnthropicProvider(Provider):
                     "real API key. It looks like it was set to a placeholder or example "
                     f"value by mistake. Set {self.api_key_env} to your actual key and try again."
                 )
-            self._client = Anthropic(api_key=api_key)
+            self._client = Anthropic(api_key=api_key, timeout=_REQUEST_TIMEOUT_SECONDS)
         return self._client
 
     def run_turn(
-        self, messages: list[dict], system: str, tools: list[dict], model: str
+        self, messages: list[dict], system: str, tools: list[dict], model: str,
+        effort: str | None = None,
     ) -> AgentResponse:
         import anthropic
 
@@ -104,6 +131,7 @@ class AnthropicProvider(Provider):
                 ],
                 messages=[*messages[:-1], _with_cache_control(messages[-1])] if messages else messages,
                 tools=_with_tool_cache_control(tools),
+                **_effort_kwargs(effort),
             )
         except anthropic.AnthropicError as e:
             raise classify_sdk_error(anthropic, e) from e
@@ -120,6 +148,7 @@ class AnthropicProvider(Provider):
         tools: list[dict],
         model: str,
         on_delta: Callable[[str], None],
+        effort: str | None = None,
     ) -> AgentResponse:
         import anthropic
 
@@ -137,6 +166,7 @@ class AnthropicProvider(Provider):
                 ],
                 messages=[*messages[:-1], _with_cache_control(messages[-1])] if messages else messages,
                 tools=_with_tool_cache_control(tools),
+                **_effort_kwargs(effort),
             ) as stream:
                 for text in stream.text_stream:
                     on_delta(text)
@@ -181,3 +211,15 @@ class AnthropicProvider(Provider):
             if block.type == "tool_use" and block.name == tool["name"]:
                 return block.input, usage
         return {}, usage
+
+    def list_models(self) -> list[str]:
+        import anthropic
+
+        client = self._get_client()
+        try:
+            # The SDK's returned page auto-fetches subsequent pages as it's
+            # iterated, so this collects the full catalog, not just the first page.
+            models = [m.id for m in client.models.list()]
+        except anthropic.AnthropicError as e:
+            raise classify_sdk_error(anthropic, e) from e
+        return sorted(models, reverse=True)

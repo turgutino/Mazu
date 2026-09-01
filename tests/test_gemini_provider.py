@@ -347,3 +347,49 @@ def test_stream_delivers_full_text_via_fallback(monkeypatch):
 
     assert received == ["full answer"]
     assert response.stop_reason == "end_turn"
+
+
+# ---------------------------------------------------------------------------
+# GeminiProvider.list_models()
+# ---------------------------------------------------------------------------
+
+
+def _make_model(name: str, supported_actions=("generateContent",)) -> types.Model:
+    return types.Model(name=name, supported_actions=list(supported_actions))
+
+
+def test_list_models_strips_models_prefix_and_sorts(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "sk-fake")
+    provider = GeminiProvider()
+    fake_client = MagicMock()
+    fake_client.models.list.return_value = [
+        _make_model("models/gemini-2.0-flash"),
+        _make_model("models/gemini-2.5-pro"),
+    ]
+    provider._client = fake_client
+
+    assert provider.list_models() == ["gemini-2.0-flash", "gemini-2.5-pro"]
+
+
+def test_list_models_excludes_models_without_generate_content(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "sk-fake")
+    provider = GeminiProvider()
+    fake_client = MagicMock()
+    fake_client.models.list.return_value = [
+        _make_model("models/gemini-2.0-flash", supported_actions=("generateContent",)),
+        _make_model("models/text-embedding-004", supported_actions=("embedContent",)),
+    ]
+    provider._client = fake_client
+
+    assert provider.list_models() == ["gemini-2.0-flash"]
+
+
+def test_list_models_wraps_sdk_errors(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "sk-fake")
+    provider = GeminiProvider()
+    fake_client = MagicMock()
+    fake_client.models.list.side_effect = _make_api_error(401)
+    provider._client = fake_client
+
+    with pytest.raises(MazuAuthError):
+        provider.list_models()

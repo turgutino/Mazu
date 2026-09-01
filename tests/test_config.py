@@ -260,6 +260,36 @@ def test_load_config_never_overwrites_an_existing_env_var(monkeypatch):
     assert os.environ["ANTHROPIC_API_KEY"] == "sk-real-env-value"
 
 
+def test_load_config_refreshes_a_key_it_previously_injected_itself(monkeypatch):
+    # Real bug found via live testing: mazu-web is a long-running process that
+    # calls load_config() fresh on every chat turn, but the old "only inject if
+    # empty" guard meant the very first turn's key got stuck in os.environ for the
+    # rest of the process's life -- rotating the key afterward via the Config UI
+    # silently had no effect until the whole server was restarted by hand.
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    set_config_value("deepseek_api_key", "sk-old-key")
+    load_config()
+    assert os.environ["DEEPSEEK_API_KEY"] == "sk-old-key"
+
+    set_config_value("deepseek_api_key", "sk-new-rotated-key")
+    load_config()
+    assert os.environ["DEEPSEEK_API_KEY"] == "sk-new-rotated-key"
+
+
+def test_load_config_still_defers_to_a_real_env_var_set_after_our_own_injection(monkeypatch):
+    # Once we've injected a value, a user (or another process) is still free to
+    # override it directly -- that override must stick, not get clobbered by our
+    # next load_config() refresh.
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    set_config_value("deepseek_api_key", "sk-config-value")
+    load_config()
+    assert os.environ["DEEPSEEK_API_KEY"] == "sk-config-value"
+
+    os.environ["DEEPSEEK_API_KEY"] = "sk-manually-overridden"
+    load_config()
+    assert os.environ["DEEPSEEK_API_KEY"] == "sk-manually-overridden"
+
+
 # ---------------------------------------------------------------------------
 # default_model() precedence (client.py, config-file layer)
 # ---------------------------------------------------------------------------

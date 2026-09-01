@@ -65,7 +65,7 @@ def _to_gemini_contents(messages: list[dict]):
                     parts.append(types.Part.from_function_call(name=block["name"], args=block["input"]))
             if parts:
                 contents.append(types.Content(role="model", parts=parts))
-        else:  # user turn: plain text, or tool_result blocks from a prior tool round
+        else:  # user turn: plain text, image blocks, or tool_result blocks from a prior tool round
             parts = []
             for block in content:
                 if block.get("type") == "tool_result":
@@ -77,6 +77,18 @@ def _to_gemini_contents(messages: list[dict]):
                     )
                 elif block.get("type") == "text":
                     parts.append(types.Part.from_text(text=block["text"]))
+                elif block.get("type") == "image":
+                    # Anthropic's canonical {"source": {"media_type", "data": <base64>}}
+                    # -- Part.from_bytes wants raw bytes, not the base64 string itself.
+                    import base64
+
+                    source = block.get("source", {})
+                    parts.append(
+                        types.Part.from_bytes(
+                            data=base64.b64decode(source.get("data", "")),
+                            mime_type=source.get("media_type", "image/png"),
+                        )
+                    )
             if parts:
                 contents.append(types.Content(role="user", parts=parts))
 
@@ -125,6 +137,21 @@ def _parse_gemini_response(response) -> AgentResponse:
     return AgentResponse(stop_reason=stop_reason, content=content_blocks, usage=usage)
 
 
+def _thinking_config(effort: str | None):
+    """Mazu's own three-level vocabulary ("low"/"medium"/"high") mapped onto the
+    installed google-genai SDK's ThinkingConfig.thinking_level enum (verified via
+    `from google.genai import types; types.ThinkingLevel` -- MINIMAL/LOW/MEDIUM/
+    HIGH), Gemini's direct equivalent of Anthropic's output_config.effort and
+    OpenAI's reasoning_effort. Returns None when `effort` is unset, leaving
+    thinking_config entirely off the request -- same as omitting it.
+    """
+    if not effort:
+        return None
+    from google.genai import types
+
+    return types.ThinkingConfig(thinking_level=effort.upper())
+
+
 def _classify_gemini_error(error: Exception) -> MazuAPIError:
     from google.genai import errors as genai_errors
 
@@ -156,6 +183,8 @@ class GeminiProvider(Provider):
     chunk behavior can be verified against the live API.
     """
 
+    supports_reasoning_effort = True
+
     def __init__(self):
         self._client = None
         self.api_key_env = "GEMINI_API_KEY"
@@ -164,6 +193,7 @@ class GeminiProvider(Provider):
         if self._client is None:
             try:
                 from google import genai
+                from google.genai import types
             except ImportError as e:
                 raise MazuAuthError(
                     "The google-genai package isn't installed. Run "
@@ -179,11 +209,20 @@ class GeminiProvider(Provider):
                     "real API key. It looks like it was set to a placeholder or example "
                     f"value by mistake. Set {self.api_key_env} to your actual key and try again."
                 )
-            self._client = genai.Client(api_key=api_key)
+            # timeout is in MILLISECONDS for this SDK (google.genai.types.HttpOptions'
+            # own docstring), unlike anthropic/openai's plain-seconds `timeout=` kwarg
+            # -- see anthropic_provider.py's _REQUEST_TIMEOUT_SECONDS for why a finite
+            # timeout matters here at all (a stalled request previously hung forever
+            # with the SDK's own default, caught live via an 8+ minute unresponsive
+            # mazu-web chat session).
+            self._client = genai.Client(
+                api_key=api_key, http_options=types.HttpOptions(timeout=120_000)
+            )
         return self._client
 
     def run_turn(
-        self, messages: list[dict], system: str, tools: list[dict], model: str
+        self, messages: list[dict], system: str, tools: list[dict], model: str,
+        effort: str | None = None,
     ) -> AgentResponse:
         client = self._get_client()
         from google.genai import types
@@ -195,6 +234,7 @@ class GeminiProvider(Provider):
                 config=types.GenerateContentConfig(
                     system_instruction=system,
                     tools=_to_gemini_tools(tools),
+                    thinking_config=_thinking_config(effort),
                 ),
             )
         except Exception as e:
@@ -229,3 +269,23 @@ class GeminiProvider(Provider):
             if block["type"] == "tool_use" and block["name"] == tool["name"]:
                 return block["input"], parsed.usage
         return {}, parsed.usage
+
+    def list_models(self) -> list[str]:
+        client = self._get_client()
+        try:
+            # The returned Pager auto-fetches subsequent pages as it's iterated, so
+            # this collects the full catalog, not just the first page.
+            catalog = list(client.models.list())
+        except Exception as e:
+            raise _classify_gemini_error(e) from e
+
+        model_ids = []
+        for m in catalog:
+            # Gemini's catalog also lists embedding/imagen/veo/etc models that can't
+            # be used with generate_content -- supported_actions is how the API
+            # itself marks which ones actually accept a chat-style call.
+            if "generateContent" not in (m.supported_actions or []):
+                continue
+            name = m.name or ""
+            model_ids.append(name.removeprefix("models/"))
+        return sorted(model_ids)

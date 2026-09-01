@@ -157,6 +157,39 @@ def is_allowed_by_shell_allowlist(command: str, allowlist: list[str] | None) -> 
     return any(re.match(rf"{re.escape(name)}\b", stripped) is not None for name in allowlist)
 
 
+def _force_kill_process_tree(proc: "subprocess.Popen") -> None:
+    """Kills `proc` and every descendant it spawned -- not just the directly
+    tracked process. Real bug found via live testing: a piped command
+    (`a | b`, run through cmd.exe on Windows since shell=True always goes
+    through cmd.exe there) hung a chat turn for 3+ minutes with `communicate()`
+    never returning, well past its own 60s timeout, and with ZERO external
+    processes visible under the tracked PID by the time it was investigated --
+    a later pipeline stage had already been orphaned out from under cmd.exe by
+    the time anyone looked, so it was neither killed by a plain proc.kill() nor
+    still discoverable as "the tracked process's child" afterward. `taskkill
+    /T` kills the whole tree in one shot based on Windows' own PPID bookkeeping,
+    which doesn't depend on the tree still being intact by kill time the way
+    walking psutil.children() would. POSIX gets the equivalent via a real
+    process group (start_new_session=True at Popen creation + killpg here).
+    """
+    if platform.system() == "Windows":
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+            capture_output=True, timeout=10,
+        )
+    else:
+        import signal
+
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except ProcessLookupError:
+            pass  # already dead
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass  # best-effort reap -- a stuck taskkill/killpg must not itself hang run_shell
+
+
 def make_shell_tool(root: Path, timeout: int = 60, dry_run: bool = False) -> Tool:
     def run_shell(input: dict) -> ToolResult:
         command = input["command"]
@@ -174,14 +207,20 @@ def make_shell_tool(root: Path, timeout: int = 60, dry_run: bool = False) -> Too
                 is_error=True,
             )
         try:
-            proc = subprocess.run(
+            proc = subprocess.Popen(
                 command,
                 shell=True,
                 cwd=root,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                # Never let a shell command block waiting on input that will
+                # never arrive (run_shell has no interactive terminal behind
+                # it) -- one more way a command can hang past its own timeout
+                # if subprocess.run's default (inherit the parent's stdin)
+                # left it waiting on a read that never resolves.
+                stdin=subprocess.DEVNULL,
                 encoding="utf-8",
                 errors="replace",
-                timeout=timeout,
                 # Real bug found via live testing (twice, independently -- once with
                 # an emoji in a generated print statement, once with a Turkish/
                 # Azerbaijani letter): on Windows, a spawned Python script's own
@@ -194,19 +233,39 @@ def make_shell_tool(root: Path, timeout: int = 60, dry_run: bool = False) -> Too
                 # above, which only make *our own* capture of stdout/stderr safe,
                 # not the subprocess's own internal print() calls.
                 env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"},
+                # Puts the whole pipeline in its own process group on POSIX so
+                # _force_kill_process_tree's killpg can reach every stage of a
+                # piped command, not just the immediate shell -- Windows has no
+                # process-group equivalent here, but taskkill /T covers it there.
+                start_new_session=platform.system() != "Windows",
             )
-            output = proc.stdout
-            if proc.stderr:
-                output += "\n--- stderr ---\n" + proc.stderr
-            output += f"\n--- exit code: {proc.returncode} ---"
-            return ToolResult(output, is_error=proc.returncode != 0)
-        except subprocess.TimeoutExpired as e:
-            partial = (e.stdout or "") + (f"\n--- stderr ---\n{e.stderr}" if e.stderr else "")
+        except Exception as e:
+            return ToolResult(str(e), is_error=True)
+
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _force_kill_process_tree(proc)
+            # communicate() again (non-blocking-ish, short timeout) to collect
+            # whatever the process had already written before being killed --
+            # matches subprocess.run's own TimeoutExpired.stdout/.stderr behavior.
+            try:
+                stdout, stderr = proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                stdout, stderr = "", ""
+            partial = (stdout or "") + (f"\n--- stderr ---\n{stderr}" if stderr else "")
             return ToolResult(
                 f"Command timed out after {timeout}s.\n{partial}".rstrip(), is_error=True
             )
         except Exception as e:
+            _force_kill_process_tree(proc)
             return ToolResult(str(e), is_error=True)
+
+        output = stdout or ""
+        if stderr:
+            output += "\n--- stderr ---\n" + stderr
+        output += f"\n--- exit code: {proc.returncode} ---"
+        return ToolResult(output, is_error=proc.returncode != 0)
 
     return Tool(
         name="run_shell",

@@ -56,8 +56,23 @@ _CURATOR_CONFIG_KEYS = {"curator_api_key", "curator_model", "curator_base_url", 
 # the fallback when these are unset. council_models is a comma-joined model list,
 # matching how --models is already parsed on the command line.
 _COUNCIL_CONFIG_KEYS = {"council_models", "council_lead"}
+
+# Tracks, per env var, the last value *this process* injected via load_config()'s
+# env-injection loop below. Real bug found via live testing: mazu-web is a
+# long-running process that calls load_config() fresh on every chat/task turn
+# (see mazu_web/chat_session.py), but the injection loop only ever wrote a key
+# into os.environ if that var was still empty -- so the very first turn's config
+# value got stuck in os.environ for the rest of the process's life. Rotating the
+# key afterward via the Config UI updated config.toml on disk, but the running
+# server kept sending the stale first-loaded key to the provider until it was
+# restarted by hand. Comparing against the last value *we* injected (rather than
+# just "is the env var non-empty") lets a config.toml change flow through on the
+# very next load_config() call, while a value the user set directly in their own
+# shell -- never recorded here -- is still never touched, preserving the existing
+# "real env vars always win" guarantee the tests below depend on.
+_last_injected: dict[str, str] = {}
 KNOWN_CONFIG_KEYS = {
-    "default_model", "api_key", "local_base_url", "router_suggestions",
+    "default_model", "api_key", "local_base_url", "router_suggestions", "reasoning_effort",
     *_PROVIDER_KEY_ENV_VARS, *_CURATOR_CONFIG_KEYS, *_COUNCIL_CONFIG_KEYS,
 }
 # Keys whose stored value is a secret -- `mazu config list` masks these, never
@@ -91,21 +106,35 @@ def _read_raw_config() -> dict:
         return {}
 
 
+def _inject_env_var(env_var: str, value: str) -> None:
+    """Sets `env_var` from config unless something other than our own previous
+    injection currently occupies it -- see `_last_injected`'s comment for why this
+    is not simply "if not already set"."""
+    current = os.environ.get(env_var)
+    if current is not None and current != _last_injected.get(env_var):
+        return  # a real external env var (or one we've never touched) -- hands off
+    os.environ[env_var] = value
+    _last_injected[env_var] = value
+
+
 def load_config() -> dict:
     """Load ~/.mazu/config.toml if present and inject any configured API keys into
     the environment -- env vars set directly always take priority and are never
-    overwritten. `api_key` is a legacy alias for `anthropic_api_key`.
+    overwritten. `api_key` is a legacy alias for `anthropic_api_key`. A value
+    previously injected by this same function is refreshed on every call, so a key
+    rotated via `mazu config set` / the mazu-web Config page takes effect on the
+    next call (the next chat/task turn) without requiring a process restart.
     """
     config = _read_raw_config()
 
     legacy_anthropic_key = config.get("api_key")
-    if legacy_anthropic_key and not os.environ.get("ANTHROPIC_API_KEY"):
-        os.environ["ANTHROPIC_API_KEY"] = legacy_anthropic_key
+    if legacy_anthropic_key:
+        _inject_env_var("ANTHROPIC_API_KEY", legacy_anthropic_key)
 
     for config_key, env_var in _PROVIDER_KEY_ENV_VARS.items():
         value = config.get(config_key)
-        if value and not os.environ.get(env_var):
-            os.environ[env_var] = value
+        if value:
+            _inject_env_var(env_var, value)
 
     return config
 
@@ -117,6 +146,16 @@ def get_default_model() -> str | None:
     either) and before auto-detecting from whichever provider's key is present.
     """
     return _read_raw_config().get("default_model")
+
+
+def get_reasoning_effort() -> str | None:
+    """The `reasoning_effort` set via `mazu config set reasoning_effort low|medium|high`
+    (or the mazu-web Config/Chat pages), or None if unset. Consulted by
+    client.default_effort() after the MAZU_REASONING_EFFORT env var. Not validated
+    against {"low","medium","high"} here -- an unsupported value is left to surface
+    as a normal provider-side error, same as an invalid model string.
+    """
+    return _read_raw_config().get("reasoning_effort")
 
 
 def list_config() -> dict:

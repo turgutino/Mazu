@@ -9,6 +9,12 @@ class LocalProvider(OpenAICompatibleProvider):
     necessarily happened yet.
     """
 
+    # A local model running CPU-bound inference on the user's own hardware can
+    # legitimately take much longer per response than a cloud API -- the base
+    # class's 120s (tuned for a cloud request that's actually stalled, not just
+    # slow) would cut off a real, still-progressing local generation.
+    REQUEST_TIMEOUT_SECONDS = 600.0
+
     def __init__(self):
         super().__init__(
             base_url=None,

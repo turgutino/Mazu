@@ -73,6 +73,7 @@ def run_chat_loop(
     chat_store: ChatStore | None = None,
     resumed_messages: list[dict] | None = None,
     belief_log: BeliefShadowLogStore | None = None,
+    auto_approve: bool = False,
 ) -> None:
     messages: list[dict] = list(resumed_messages) if resumed_messages else []
     # Left None even when resuming: the first new user input still needs its own
@@ -87,6 +88,11 @@ def run_chat_loop(
     # Identical fix to mazu/agent/autonomous.py's run_autonomous() for `mazu run
     # --resume`; found live testing `mazu chat --resume` the same way that one was.
     is_resume = resumed_messages is not None
+    # A single-element list, not a plain bool, so /auto can flip it from inside the
+    # input loop below and have _run_until_done (called after the toggle) see the
+    # new value -- a bare local `auto_approve` reassignment wouldn't be visible to
+    # the closure-free call below without threading a return value back out.
+    auto_approve_flag = [auto_approve]
 
     print_banner()
     provider_name, model_name = _split_model(model or default_model())
@@ -94,8 +100,14 @@ def run_chat_loop(
     cost_trackable = estimate_cost(resolved_model, 0, 0) is not None
     print(f"model: {resolved_model}")
     print(
-        "chat — type your task. Commands: /checkpoint, /rollback [id], /compact. Ctrl+C to quit.\n"
+        "chat — type your task. Commands: /checkpoint, /rollback [id], /compact, /auto. Ctrl+C to quit.\n"
     )
+    if auto_approve_flag[0]:
+        print(
+            "[auto] auto-approve is ON for this session (--auto-approve) -- destructive "
+            "tools (shell, file delete, skill delete) will run without asking. Type /auto "
+            "to turn it off.\n"
+        )
     try:
         while True:
             try:
@@ -120,6 +132,18 @@ def run_chat_loop(
                 _handle_compact(messages, model, memory_store, usage_store, session_id, belief_log)
                 continue
 
+            if user_input == "/auto":
+                auto_approve_flag[0] = not auto_approve_flag[0]
+                if auto_approve_flag[0]:
+                    print(
+                        "[auto] auto-approve is now ON -- destructive tools (shell, file "
+                        "delete, skill delete) will run without asking. Type /auto again to "
+                        "turn it back off."
+                    )
+                else:
+                    print("[auto] auto-approve is now OFF -- destructive tools will ask for confirmation again.")
+                continue
+
             if system_prompt is None:
                 if memory_store is not None and not is_resume:
                     memory_store.start_session(session_id)
@@ -131,11 +155,18 @@ def run_chat_loop(
                 if model is None:
                     _print_chat_router_suggestion(checkpoint_manager, user_input)
 
+            # Snapshotted BEFORE appending this turn's user message -- see
+            # _run_until_done's own comment on messages_before_turn for why: an
+            # unrecoverable MazuAPIError used to leave the failed message stuck in
+            # `messages` forever, so every later turn kept resending it and
+            # re-triggering the exact same error.
+            messages_before_turn = list(messages)
             messages.append({"role": "user", "content": user_input})
             if chat_store is not None:
                 chat_store.append_message(session_id, "user", user_input, model=resolved_model)
             total_cost = _run_until_done(
                 messages,
+                messages_before_turn,
                 registry,
                 system_prompt,
                 model,
@@ -149,6 +180,7 @@ def run_chat_loop(
                 chat_store,
                 memory_store,
                 belief_log,
+                auto_approve_flag[0],
             )
     finally:
         if memory_store is not None:
@@ -239,6 +271,7 @@ def _handle_rollback(
 
 def _run_until_done(
     messages: list[dict],
+    messages_before_turn: list[dict],
     registry: ToolRegistry,
     system_prompt: str,
     model: str | None,
@@ -252,7 +285,22 @@ def _run_until_done(
     chat_store: ChatStore | None = None,
     memory_store: MemoryStore | None = None,
     belief_log: BeliefShadowLogStore | None = None,
+    auto_approve: bool = False,
 ) -> float:
+    """`messages_before_turn` is a snapshot of `messages` taken by the caller right
+    before this turn's user message was appended -- real bug found via live
+    testing (mazu-web's chat, which mirrors this function closely): a turn that
+    fails with a non-retryable MazuAPIError (e.g. an unsupported request that the
+    model rejects outright) used to leave that failed user message sitting in
+    `messages` forever. Since every LLM call resends the full history, every
+    subsequent turn kept resending the bad message and re-triggering the exact
+    same error, permanently breaking the session. Restoring this snapshot on
+    failure below discards the whole failed turn (the user message, and any
+    compaction or partial tool rounds attempted within it) so the next turn
+    starts clean. `chat_store`'s durable record is deliberately NOT rolled back --
+    it keeps everything actually attempted, same as it keeps messages compaction
+    later summarizes away.
+    """
     provider_name, model_name = _split_model(resolved_model)
     while True:
         on_compacted = extract_memories_on_compaction(
@@ -297,9 +345,11 @@ def _run_until_done(
                     messages, system_prompt, registry.schemas(), on_delta=_on_delta, model=model
                 )
             except MazuAPIError as e:
+                messages[:] = messages_before_turn
                 print(f"\n[error] {e}\nReturning to the prompt — try again, or use /rollback.")
                 return total_cost
         except MazuAPIError as e:
+            messages[:] = messages_before_turn
             print(f"\n[error] {e}\nReturning to the prompt — try again, or use /rollback.")
             return total_cost
         messages.append({"role": "assistant", "content": response.content})
@@ -372,20 +422,23 @@ def _run_until_done(
                         {"type": "tool_result", "tool_use_id": block["id"], "content": msg, "is_error": True}
                     )
                     continue
-            if tool.destructive and not _confirm(tool.name, block["input"]):
-                record_action(
-                    action_log_store, session_id, "chat", tool.name, block["input"],
-                    "declined", "User declined to run this tool.",
-                )
-                tool_results.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": block["id"],
-                        "content": "User declined to run this tool.",
-                        "is_error": True,
-                    }
-                )
-                continue
+            if tool.destructive:
+                if auto_approve:
+                    print(f"\n[auto] running {tool.name}({block['input']}) without confirmation (auto mode is on)")
+                elif not _confirm(tool.name, block["input"]):
+                    record_action(
+                        action_log_store, session_id, "chat", tool.name, block["input"],
+                        "declined", "User declined to run this tool.",
+                    )
+                    tool_results.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": block["id"],
+                            "content": "User declined to run this tool.",
+                            "is_error": True,
+                        }
+                    )
+                    continue
             result = tool.handler(block["input"])
             record_action(
                 action_log_store, session_id, "chat", tool.name, block["input"],
