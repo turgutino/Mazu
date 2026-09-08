@@ -2,6 +2,17 @@
 
 All notable changes to Mazu are documented here, newest first. Format loosely follows [Keep a Changelog](https://keepachangelog.com/); Mazu doesn't yet promise strict semver (see [ROADMAP.md](ROADMAP.md) for what "1.0" would mean) — treat version bumps as "a meaningful batch of work shipped," not a compatibility contract.
 
+## 0.24.1 — `mazu run --dry-run` no longer makes real memory/skill writes or a real billed call
+
+- **Fixed (found live, via a dedicated CLI audit following the 0.24.0 mazu-web audit):** `--dry-run`'s own help text and report header ("nothing was actually changed") were contradicted by four real code paths that had no `dry_run` concept at all, unlike `write_file`/`edit_file`/`run_shell`, which already did:
+  - `remember` (`mazu/tools/memory_tools.py`) made a real, permanent `memory.db` write.
+  - `save_skill` (`mazu/tools/skill_tools.py`) wrote a real skill file to disk.
+  - `run_skill` (marked `destructive=True`) **executed arbitrary previously-saved Python for real**.
+  - The end-of-session memory extraction (`mazu/agent/session.py`'s `finalize_session`, called unconditionally from `mazu/agent/autonomous.py`'s `finally` block) made a real, billed LLM call and inserted its results, regardless of `--dry-run`.
+  
+  All four now respect `dry_run` (threaded through `mazu/agent/registry_factory.py`'s `build_registry()`, already the single seam `mazu run`/`mazu-web`'s Run tab both go through), reporting `[dry-run] Would ...` instead of acting, and `finalize_session(dry_run=True)` skips extraction entirely rather than making the call and discarding it. Verified live: a real dry-run task that called `remember` correctly logged `[dry-run] Would remember (this project): ...` in the action log, with `memory.db` confirmed empty afterward and "Memories saved: 0" in the report — before the fix, this same task would have written a real row.
+- 7 new regression tests (`tests/test_dry_run_memory_and_skills.py`), including one exercising the exact `build_registry()` seam `mazu run` itself uses.
+
 ## 0.24.0 — Multi-modal chat, reasoning effort, live model discovery, and a decorative-UI audit across mazu-web
 
 - **Added:** image and document input for chat. Anthropic/OpenAI/Gemini providers now convert image content blocks to their own native format (`mazu/llm/providers/*_provider.py`); a new `mazu/files/document_extract.py` extracts plain text from `.docx`/`.pdf`/`.xlsx`/`.pptx` (python-docx/pypdf/openpyxl/python-pptx, new optional `mazu[documents]` extra) so any provider can read an attached file uniformly, with no native per-provider document block needed. Wired end-to-end through `mazu-web`'s chat (attach button, size/type validation, extraction-before-send).

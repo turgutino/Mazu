@@ -310,7 +310,7 @@ def run_autonomous(
         if memory_store is not None:
             memories_saved = finalize_session(
                 memory_store, session_id, messages, model=model, usage_store=usage_store,
-                belief_log=belief_log,
+                belief_log=belief_log, dry_run=dry_run,
             )
         if global_memory_store is not None:
             global_memory_store.close()

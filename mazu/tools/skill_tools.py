@@ -2,9 +2,16 @@ from mazu.skills.manager import SkillManager
 from mazu.tools.base import Tool, ToolResult
 
 
-def make_skill_tools(manager: SkillManager) -> list[Tool]:
+def make_skill_tools(manager: SkillManager, dry_run: bool = False) -> list[Tool]:
     def save_skill(input: dict) -> ToolResult:
         try:
+            if dry_run:
+                # Real bug found live: `mazu run --dry-run` never actually reached
+                # here (this factory had no dry_run concept at all), so save_skill
+                # wrote a real skill file to disk even during a run explicitly
+                # meant to change nothing. Mirrors write_file/edit_file's own
+                # dry-run pattern (mazu/tools/fs.py).
+                return ToolResult(f"[dry-run] Would save skill '{input['name']}'.")
             manager.save(
                 name=input["name"],
                 description=input["description"],
@@ -30,6 +37,12 @@ def make_skill_tools(manager: SkillManager) -> list[Tool]:
         return ToolResult("\n".join(lines))
 
     def run_skill(input: dict) -> ToolResult:
+        if dry_run:
+            # Real bug found live: run_skill executes arbitrary previously-saved
+            # Python for real (manager.run) with no dry_run gate at all -- a
+            # `mazu run --dry-run` session that called this would have real code
+            # execute despite the run's own "nothing was actually changed" report.
+            return ToolResult(f"[dry-run] Would run skill '{input['name']}'.")
         output, is_error = manager.run(input["name"], input.get("args", {}))
         return ToolResult(output, is_error=is_error)
 

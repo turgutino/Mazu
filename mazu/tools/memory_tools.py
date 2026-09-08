@@ -81,6 +81,7 @@ def make_memory_tools(
     session_id: str,
     belief_log=None,
     project: str | None = None,
+    dry_run: bool = False,
 ) -> list[Tool]:
     def remember(input: dict) -> ToolResult:
         try:
@@ -88,11 +89,22 @@ def make_memory_tools(
             # user_preference is about the person, not this codebase -- it goes in the
             # global store so it's visible in every project, not just this one.
             target_store = global_store if category == "user_preference" else store
+            scope = "global, all projects" if category == "user_preference" else "this project"
+            supersedes_id = input.get("supersedes_id")
+            if dry_run:
+                # Real bug found live: `mazu run --dry-run` never actually reached
+                # here (this tool had no dry_run concept at all), so `remember`
+                # made a real, permanent write to memory.db even during a run
+                # explicitly meant to change nothing -- directly contradicting its
+                # own "nothing was actually changed" report. Mirrors write_file/
+                # edit_file's own dry-run pattern (mazu/tools/fs.py): report what
+                # would happen, touch nothing.
+                note = f" (would mark memory {supersedes_id} as superseded)" if supersedes_id is not None else ""
+                return ToolResult(f"[dry-run] Would remember ({scope}): {input['title']}{note}")
             # None unless MAZU_SEMANTIC_MEMORY is opted into (see memory/embeddings.py)
             # -- add() stores None as a plain NULL, so this never changes behavior for
             # anyone who hasn't turned semantic search on.
             embedding = embed_text(f"{input['title']} {input['body']}")
-            supersedes_id = input.get("supersedes_id")
             # Fetched BEFORE add()/supersede() so the shadow observer sees the old
             # memory's content exactly as it was when the agent decided to replace
             # it -- purely a read, changes nothing.
@@ -114,7 +126,6 @@ def make_memory_tools(
                     note = f" (marked memory {supersedes_id} as superseded)"
                 else:
                     note = f" (warning: no memory with id {supersedes_id} to supersede)"
-            scope = "global, all projects" if category == "user_preference" else "this project"
             message = f"Remembered (id={memory_id}, {scope}): {input['title']}{note}"
 
             if belief_log is not None:

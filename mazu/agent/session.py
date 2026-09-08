@@ -98,6 +98,7 @@ def finalize_session(
     model: str | None = None,
     usage_store: UsageStore | None = None,
     belief_log: BeliefShadowLogStore | None = None,
+    dry_run: bool = False,
 ) -> int:
     """Runs once at the end of a session: the cheap-model safety net that catches
     whatever the agent forgot to `remember` explicitly during the conversation.
@@ -108,7 +109,18 @@ def finalize_session(
     the SHADOW-MODE belief check (see mazu.memory.belief) -- purely observational,
     never mutates memory_store. Defaults to None: omitting it reproduces today's
     exact behavior for every existing caller.
+
+    `dry_run`, when True, skips extraction entirely -- real bug found live:
+    `mazu run --dry-run` used to call this unconditionally, which made a real,
+    billed LLM call (extract_memories) and real memory_store writes even for a
+    run whose own report claims "nothing was actually changed". Defaults to
+    False: omitting it reproduces today's exact behavior for every existing
+    caller (mazu chat and mazu-web's chat have no dry-run concept at all).
     """
+    if dry_run:
+        memory_store.close()
+        return 0
+
     inserted, extracted = insert_extracted_memories(
         memory_store, session_id, messages, model=model, usage_store=usage_store, belief_log=belief_log
     )

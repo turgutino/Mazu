@@ -34,9 +34,10 @@ def build_registry(
         registry.register(tool)
     registry.register(make_shell_tool(root, dry_run=dry_run))
     for tool in make_memory_tools(
-        memory_store, global_memory_store, session_id, belief_log=belief_log, project=str(root)
+        memory_store, global_memory_store, session_id, belief_log=belief_log, project=str(root),
+        dry_run=dry_run,
     ):
         registry.register(tool)
-    for tool in make_skill_tools(skill_manager):
+    for tool in make_skill_tools(skill_manager, dry_run=dry_run):
         registry.register(tool)
     return registry
