@@ -16,15 +16,26 @@ _NON_CHAT_MARKERS = (
 class OpenAIProvider(OpenAICompatibleProvider):
     # Only OpenAI's own reasoning-model families (o-series, gpt-5) accept
     # `reasoning_effort` -- a non-reasoning model (e.g. gpt-4o) rejects it with a
-    # 400. Deliberately not narrowed further by model name here (see
-    # _is_chat_model's docstring for the same reasoning): a hardcoded
-    # reasoning-vs-non-reasoning model list would go stale the day OpenAI ships a
-    # new family. Picking an effort level with a non-reasoning model surfaces as a
-    # normal MazuAPIError from the provider, same as any other invalid request.
+    # 400. supports_reasoning_effort stays True at the class level because
+    # run_turn/run_turn_stream's actual behavior (send it whenever asked, let a
+    # non-reasoning model's own 400 surface as a normal MazuAPIError) is
+    # unchanged -- narrowing THAT by model name would need a real allowlist kept
+    # in lockstep with the request path, worth avoiding for the same staleness
+    # reason _is_chat_model's docstring gives. supports_reasoning_effort_for()
+    # below is a SEPARATE, best-effort, UI-only signal (mazu-web's effort-chip
+    # disabling) -- a naming-convention heuristic, not an allowlist: a brand-new
+    # reasoning family this doesn't recognize just means the chip stays enabled
+    # for it (fails open), it never blocks or changes an actual request.
     supports_reasoning_effort = True
+
+    _REASONING_MODEL_PREFIXES = ("o1", "o3", "o4")
 
     def __init__(self):
         super().__init__(base_url=None, api_key_env="OPENAI_API_KEY", provider_label="openai:")
+
+    def supports_reasoning_effort_for(self, model_name: str) -> bool:
+        lowered = model_name.lower()
+        return lowered.startswith(self._REASONING_MODEL_PREFIXES) or "gpt-5" in lowered
 
     def _is_chat_model(self, model_id: str) -> bool:
         """A deliberately conservative substring denylist, not an allowlist: new

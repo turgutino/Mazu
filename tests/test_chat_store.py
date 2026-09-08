@@ -20,6 +20,24 @@ def test_append_message_creates_the_session_on_first_call(store: ChatStore):
     assert session["title"] == "fix the parser bug"
 
 
+def test_append_message_updates_model_on_later_calls_not_just_the_first(store: ChatStore):
+    # Real bug found live: a mid-conversation model switch (the web Chat page's
+    # model chip, or ChatSession.set_model()) passes the NEW model into every
+    # later append_message() call, but the column only ever got set on the
+    # first INSERT -- so a resumed session always reverted to whichever model
+    # the conversation started with, silently discarding a later switch.
+    store.append_message("s1", "user", "hello", model="deepseek:deepseek-chat")
+    store.append_message("s1", "assistant", [{"type": "text", "text": "hi"}], model="deepseek:deepseek-chat")
+    store.append_message("s1", "user", "switching models now", model="openai:gpt-4o")
+    assert store.get_session("s1")["model"] == "openai:gpt-4o"
+
+
+def test_append_message_without_a_model_leaves_the_stored_model_unchanged(store: ChatStore):
+    store.append_message("s1", "user", "hello", model="deepseek:deepseek-chat")
+    store.append_message("s1", "assistant", [{"type": "text", "text": "hi"}])
+    assert store.get_session("s1")["model"] == "deepseek:deepseek-chat"
+
+
 def test_append_message_never_overwrites_the_title_after_the_first_user_message(store: ChatStore):
     store.append_message("s1", "user", "first question")
     store.append_message("s1", "assistant", [{"type": "text", "text": "answer"}])

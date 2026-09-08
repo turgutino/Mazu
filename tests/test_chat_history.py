@@ -287,3 +287,45 @@ def test_chat_resume_passes_saved_history_into_run_chat_loop(tmp_path, monkeypat
         {"role": "user", "content": "earlier question"},
         {"role": "assistant", "content": [{"type": "text", "text": "earlier answer"}]},
     ]
+
+
+def test_chat_resume_without_explicit_model_uses_the_session_s_own_last_used_model(tmp_path, monkeypatch):
+    # Real bug found live: without this, --resume always fell back to
+    # --model/MAZU_MODEL/default_model() as if the session had never used
+    # anything else -- silently reverting a conversation that had been switched
+    # to a different model mid-chat back to whatever its FIRST turn used.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-fake")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake-anthropic")
+    chat_store = ChatStore(tmp_path / ".mazu" / "chat_history.db")
+    chat_store.append_message("s1", "user", "earlier question", model="deepseek:deepseek-chat")
+    chat_store.append_message("s1", "user", "switched models", model="anthropic:claude-sonnet-5")
+    chat_store.close()
+
+    captured = {}
+    monkeypatch.setattr(cli_module, "run_chat_loop", lambda registry, **kwargs: captured.update(kwargs))
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["chat", "--resume", "s1"])
+
+    assert result.exit_code == 0, result.output
+    assert captured["model"] == "anthropic:claude-sonnet-5"
+
+
+def test_chat_resume_with_explicit_model_flag_overrides_the_session_s_stored_model(tmp_path, monkeypatch):
+    # An explicit --model on THIS invocation is the more specific, just-stated
+    # intent, so it still wins over whatever the session last used.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-fake")
+    chat_store = ChatStore(tmp_path / ".mazu" / "chat_history.db")
+    chat_store.append_message("s1", "user", "earlier question", model="anthropic:claude-sonnet-5")
+    chat_store.close()
+
+    captured = {}
+    monkeypatch.setattr(cli_module, "run_chat_loop", lambda registry, **kwargs: captured.update(kwargs))
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["chat", "--resume", "s1", "--model", "deepseek:deepseek-chat"])
+
+    assert result.exit_code == 0, result.output
+    assert captured["model"] == "deepseek:deepseek-chat"

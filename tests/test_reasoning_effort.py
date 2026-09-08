@@ -37,6 +37,61 @@ def test_deepseek_and_local_do_not_support_effort():
 
 
 # ---------------------------------------------------------------------------
+# supports_reasoning_effort_for -- finer-grained, per-MODEL signal used only by
+# mazu-web's effort-chip UI (not consulted by run_turn itself). Real bug found
+# live: the class-level flag alone left the chip "active" for openai:gpt-4o (a
+# non-reasoning OpenAI model that rejects reasoning_effort with a 400), since
+# OpenAI-the-provider does support the parameter for SOME of its own models.
+# ---------------------------------------------------------------------------
+
+
+def test_openai_reasoning_models_report_supported():
+    provider = OpenAIProvider()
+    for model in ["o1", "o1-mini", "o3", "o3-mini", "o4-mini", "gpt-5", "gpt-5-mini", "gpt-5.1-codex"]:
+        assert provider.supports_reasoning_effort_for(model) is True, model
+
+
+def test_openai_non_reasoning_models_report_unsupported():
+    provider = OpenAIProvider()
+    for model in ["gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-3.5-turbo", "chat-latest"]:
+        assert provider.supports_reasoning_effort_for(model) is False, model
+
+
+def test_providers_without_an_override_fall_back_to_the_class_level_flag():
+    assert AnthropicProvider().supports_reasoning_effort_for("claude-sonnet-5") is True
+    assert GeminiProvider().supports_reasoning_effort_for("gemini-2.0-flash") is True
+    assert DeepSeekProvider().supports_reasoning_effort_for("deepseek-chat") is False
+    assert LocalProvider().supports_reasoning_effort_for("any-model") is False
+
+
+# ---------------------------------------------------------------------------
+# supports_vision_for -- same best-effort, UI-only, fail-open character as
+# supports_reasoning_effort_for above, backing mazu-web's attach-button
+# warning. Real bug found live: attaching an image to a plain
+# deepseek:deepseek-chat session produced a raw provider error only after
+# sending, with nothing warning upfront that the model is text-only.
+# ---------------------------------------------------------------------------
+
+
+def test_deepseek_vision_models_report_supported():
+    provider = DeepSeekProvider()
+    assert provider.supports_vision_for("deepseek-v4-flash-vision-exp") is True
+
+
+def test_deepseek_text_only_models_report_unsupported():
+    provider = DeepSeekProvider()
+    for model in ["deepseek-chat", "deepseek-reasoner", "deepseek-v4-flash", "deepseek-v4-pro"]:
+        assert provider.supports_vision_for(model) is False, model
+
+
+def test_providers_without_a_vision_override_fail_open():
+    assert AnthropicProvider().supports_vision_for("claude-sonnet-5") is True
+    assert OpenAIProvider().supports_vision_for("gpt-4o") is True
+    assert GeminiProvider().supports_vision_for("gemini-2.0-flash") is True
+    assert LocalProvider().supports_vision_for("any-model") is True
+
+
+# ---------------------------------------------------------------------------
 # AnthropicProvider -- thinking + output_config.effort
 # ---------------------------------------------------------------------------
 

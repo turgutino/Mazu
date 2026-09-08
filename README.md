@@ -4,7 +4,7 @@
 
 **Mazu is a local memory and checkpoint layer for coding agents.**
 
-Alpha, but usable — the core loop (memory, checkpoints, rollback) has been exercised through live testing against real Anthropic/OpenAI/DeepSeek API keys and a 970+ test suite (see [Status & roadmap](#status--roadmap) for the honest gaps list, not just the wins).
+Alpha, but usable — the core loop (memory, checkpoints, rollback) has been exercised through live testing against real Anthropic/OpenAI/DeepSeek API keys and a 1068+ test suite (see [Status & roadmap](#status--roadmap) for the honest gaps list, not just the wins).
 
 ```
   ███╗   ███╗
@@ -51,6 +51,11 @@ pip install "mazu[gemini]"
 
 # Only needed for `mazu ui` (the terminal UI):
 pip install "mazu[ui]"
+
+# Only needed for extracting attached .docx/.pdf/.xlsx/.pptx files -- pulled in
+# automatically if you install mazu-web, since document attachment is a
+# browser-UI-only feature today (no terminal equivalent):
+pip install "mazu[documents]"
 ```
 
 To work on Mazu itself instead, install it from source in editable mode:
@@ -127,7 +132,9 @@ Inside the `>` prompt, two extra commands are always available:
 | `/checkpoint` | Snapshot code, memory, and the live conversation right now |
 | `/rollback [id]` | Restore all three to that checkpoint (defaults to the most recent one) |
 
-Any destructive tool call (writing a file, editing a file, running a shell command) asks for confirmation first. Responses stream in as they're generated (token-by-token where the provider supports it), and each response's `[usage]` line includes a running estimated cost for the session where pricing data is available.
+Any destructive tool call (writing a file, editing a file, running a shell command) asks for confirmation first. Responses stream in as they're generated (token-by-token where the provider supports it), and each response's `[usage]` line shows both that message's and the session's running cost where pricing data is available for the current model (and says so plainly when it isn't, instead of just omitting the figure).
+
+For providers that support it (Anthropic, OpenAI's o-series/gpt-5 models, Gemini), `mazu config set reasoning_effort low|medium|high` (or `MAZU_REASONING_EFFORT`) controls how much the model reasons before answering. DeepSeek and local models accept the setting but ignore it — there's no per-model request-time gate in the terminal (see `mazu-web`'s equivalent UI control below, which does warn when the current model won't honor it).
 
 `mazu chat --shell-allowlist "git,npm,pytest"` restricts shell commands to ones starting with a listed program name — opt-in, and additive to the hardcoded denylist below (which always applies regardless).
 
@@ -302,6 +309,8 @@ An interactive, full-screen alternative to `mazu timeline`/`mazu memory list`/`m
 ### Web UI (separate package)
 
 Prefer a browser tab over a terminal? [`mazu-web`](https://github.com/turgutino/mazu-web) is a companion package — full parity with the commands above (chat, run, explore, council, checkpoints, memory, skills, router, usage, log, models, doctor, config, init, setup), streamed over the browser instead of printed to a terminal. Kept as a fully separate repo/package on purpose: the core `mazu` install stays terminal-first and dependency-light (no `flask`), and only pulls in a web stack if you explicitly install `mazu-web` on top.
+
+A few things only the browser UI currently offers, on top of the terminal's own feature set: attaching an image or a document (`.docx`/`.pdf`/`.xlsx`/`.pptx`, extracted to plain text via the optional `mazu[documents]` extra) to a chat message; a live, real-API-backed model picker per provider instead of picking a model name blind; and Explore's test-command field pre-filling itself with a best-effort guess (pytest/npm/go/cargo/maven/gradle markers) instead of starting empty.
 
 ```bash
 pip install "mazu-web @ git+https://github.com/turgutino/mazu-web.git"
@@ -478,7 +487,7 @@ The module map, the provider adapter seam, and how memory/checkpoints/skills fit
 
 ## Status & roadmap
 
-Milestones M1–M4 (bare tool loop, persistent memory, checkpoint/rollback, supervised autonomy) all have a working implementation, plus multi-provider support (five providers, including a fully local, no-API-key option), council mode, explore mode (parallel branch exploration with automatic test-based ranking, plus a learning router that suggests — never auto-applies — a model based on your own project's past explore results), real-time streaming (`mazu chat`), context compaction (`mazu run`/`mazu chat`, including mid-session on hitting a real context-length error), dry-run mode, shell allowlists, a persistent agent action log (`mazu log`), resumable runs (`mazu run --resume`), branching checkpoints (`mazu run --from-checkpoint`, `mazu checkpoint compare-branches`), machine-readable `--json` output on the read-oriented commands, a model capability table (`mazu models`), persistent settings (`mazu config`), guided onboarding (`mazu setup`, `mazu doctor --fix`), a terminal UI (`mazu ui`), a separate [`mazu-web`](https://github.com/turgutino/mazu-web) browser companion with full command parity, optional semantic memory search, an opt-in autonomous maintenance process (`mazu curator`) for Mazu's own accumulated state, and an experimental, observation-only belief-shadow system (`mazu memory-belief`) laying the groundwork for eventually detecting outdated/contradictory memories automatically. This has been exercised through real, live head-to-head testing across Anthropic, OpenAI, and DeepSeek (full real generations on all three, not just authentication checks) on a range of real coding tasks — bugfixes, refactors, feature work, diagnosis — with real cost/quality/reliability data collected via `mazu explore`, plus a real local model served through LM Studio. Gemini is implemented and was previously live-verified for authentication, but hasn't been exercised in this latest round of real testing (no working Gemini credentials were available) — see known gaps. All of the above runs on every push via GitHub Actions across Python 3.11–3.13 on Linux/Windows/macOS, on a test suite of 970+ tests (zero API cost by default). A [VS Code/Cursor extension design document](docs/vscode-extension-design.md) exists for a possible future editor integration — design only, not implemented; [CHANGELOG.md](CHANGELOG.md) has the version-by-version history.
+Milestones M1–M4 (bare tool loop, persistent memory, checkpoint/rollback, supervised autonomy) all have a working implementation, plus multi-provider support (five providers, including a fully local, no-API-key option), council mode, explore mode (parallel branch exploration with automatic test-based ranking, plus a learning router that suggests — never auto-applies — a model based on your own project's past explore results), real-time streaming (`mazu chat`), context compaction (`mazu run`/`mazu chat`, including mid-session on hitting a real context-length error), dry-run mode, shell allowlists, a persistent agent action log (`mazu log`), resumable runs (`mazu run --resume`), branching checkpoints (`mazu run --from-checkpoint`, `mazu checkpoint compare-branches`), machine-readable `--json` output on the read-oriented commands, a model capability table (`mazu models`), persistent settings (`mazu config`), guided onboarding (`mazu setup`, `mazu doctor --fix`), a terminal UI (`mazu ui`), a separate [`mazu-web`](https://github.com/turgutino/mazu-web) browser companion with full command parity, optional semantic memory search, an opt-in autonomous maintenance process (`mazu curator`) for Mazu's own accumulated state, and an experimental, observation-only belief-shadow system (`mazu memory-belief`) laying the groundwork for eventually detecting outdated/contradictory memories automatically. This has been exercised through real, live head-to-head testing across Anthropic, OpenAI, and DeepSeek (full real generations on all three, not just authentication checks) on a range of real coding tasks — bugfixes, refactors, feature work, diagnosis — with real cost/quality/reliability data collected via `mazu explore`, plus a real local model served through LM Studio. Gemini is implemented and was previously live-verified for authentication, but hasn't been exercised in this latest round of real testing (no working Gemini credentials were available) — see known gaps. All of the above runs on every push via GitHub Actions across Python 3.11–3.13 on Linux/Windows/macOS, on a test suite of 1068+ tests (zero API cost by default). Also new since the last major milestone: image/document input for chat (`mazu-web`), reasoning-effort control for providers that support it, live real-API-backed model discovery (`mazu-web`'s model pickers), and a dedicated audit pass that found and fixed 11 real cases across `mazu-web` where a control implied backend behavior that didn't actually happen — see [CHANGELOG.md](CHANGELOG.md)'s 0.24.0 entry for the full list. A [VS Code/Cursor extension design document](docs/vscode-extension-design.md) exists for a possible future editor integration — design only, not implemented; [CHANGELOG.md](CHANGELOG.md) has the version-by-version history.
 
 **Known gaps, honestly listed:**
 - **Automatic memory correction doesn't exist yet, by design.** `mazu memory-belief` observes real memory decisions (both the agent's own explicit `remember`/`supersede` calls and a cheap classifier's judgment on auto-extracted near-duplicates) and logs what it *would* do, but nothing is ever applied automatically. As of this writing, real observed decisions across actual usage are still well below the sample size (~20-30) needed to responsibly evaluate whether an automatic version would be trustworthy — this is deliberately staying in evidence-gathering mode until that changes.

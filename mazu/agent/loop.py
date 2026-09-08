@@ -372,10 +372,16 @@ def _run_until_done(
             )
             if cost_trackable else None
         )
-        cost_suffix = ""
         if step_cost is not None:
             total_cost += step_cost
-            cost_suffix = f" | ~${total_cost:.4f} total"
+            cost_suffix = f" | ~${step_cost:.4f} this message, ~${total_cost:.4f} total"
+        else:
+            # cost_trackable is False when estimate_cost() has no pricing data for
+            # this model (e.g. a newly-discovered live model not in mazu/llm/
+            # pricing.py's static table) -- say so explicitly rather than silently
+            # dropping the cost figure, which used to look like tracking was
+            # working when it had actually just gone quiet.
+            cost_suffix = " | cost unknown for this model (no pricing data)"
         if usage_store is not None:
             usage_store.log(
                 "chat", session_id, provider_name, model_name, input_tokens, output_tokens, step_cost,

@@ -86,6 +86,16 @@ class ChatStore:
                 "VALUES (?, ?, ?, ?, ?)",
                 (session_id, now, now, model, _derive_title(content) if role == "user" else None),
             )
+        elif model is not None:
+            # Real bug found live: this used to only ever set `model` on the row's
+            # very first INSERT -- a mid-conversation model switch (the Chat page's
+            # model chip, or ChatSession.set_model()) never reached this column, so
+            # resuming a session later always resolved to whatever the FIRST turn
+            # used, not the model the conversation was actually last using.
+            self.conn.execute(
+                "UPDATE chat_sessions SET updated_at = ?, model = ? WHERE session_id = ?",
+                (now, model, session_id),
+            )
         else:
             self.conn.execute(
                 "UPDATE chat_sessions SET updated_at = ? WHERE session_id = ?", (now, session_id)

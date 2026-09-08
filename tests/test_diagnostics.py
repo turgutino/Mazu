@@ -6,9 +6,11 @@ from unittest.mock import patch
 import pytest
 
 from mazu.diagnostics import (
+    CheckResult,
     apply_fixes,
     check_api_keys,
     check_curator,
+    check_curator_live_key,
     check_git_available,
     check_gitignore,
     check_live_api_key,
@@ -351,3 +353,61 @@ def test_run_diagnostics_includes_curator_check(tmp_path: Path):
     results = run_diagnostics(tmp_path)
     names = {r.name for r in results}
     assert "curator" in names
+
+
+# ---------------------------------------------------------------------------
+# check_curator_live_key / run_diagnostics(live=True) -- real bug found live:
+# Curator authenticates through its own isolated client (curator/client.py),
+# structurally invisible to the main-provider live loop above, so the "Also
+# verify keys" checkbox used to never actually exercise Curator's key at all --
+# its status line looked identical whether --live was passed or not.
+# ---------------------------------------------------------------------------
+
+
+def test_run_diagnostics_live_skips_curator_when_unconfigured(tmp_path):
+    with patch("mazu.diagnostics.check_curator_live_key") as mock_live:
+        run_diagnostics(tmp_path, live=True)
+    mock_live.assert_not_called()
+
+
+def test_run_diagnostics_live_checks_curator_when_configured(tmp_path):
+    from mazu.config import set_config_value
+
+    set_config_value("curator_api_key", "sk-curator-secret")
+    set_config_value("curator_model", "anthropic:claude-haiku-4-5")
+
+    with patch("mazu.diagnostics.check_curator_live_key") as mock_live:
+        mock_live.return_value = CheckResult("curator (live)", "ok", "authenticated successfully")
+        results = run_diagnostics(tmp_path, live=True)
+
+    mock_live.assert_called_once()
+    assert any(r.name == "curator (live)" for r in results)
+
+
+def test_check_curator_live_key_calls_curator_s_own_isolated_client():
+    captured = {}
+
+    def _fake_run_curator_turn(messages, system, tools):
+        captured["messages"] = messages
+        from mazu.llm.types import AgentResponse
+
+        return AgentResponse(stop_reason="end_turn", content=[], usage={})
+
+    with patch("mazu.curator.client.run_curator_turn", side_effect=_fake_run_curator_turn):
+        result = check_curator_live_key()
+
+    assert result.status == "ok"
+    assert captured["messages"]
+
+
+def test_check_curator_live_key_reports_a_rejected_key_as_fail():
+    with patch("mazu.curator.client.run_curator_turn", side_effect=MazuAuthError("bad key")):
+        result = check_curator_live_key()
+    assert result.status == "fail"
+    assert "rejected" in result.message
+
+
+def test_check_curator_live_key_reports_a_non_auth_error_as_warn():
+    with patch("mazu.curator.client.run_curator_turn", side_effect=MazuTransientError("network blip")):
+        result = check_curator_live_key()
+    assert result.status == "warn"

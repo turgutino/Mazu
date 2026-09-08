@@ -69,6 +69,46 @@ def test_set_unknown_key_raises_value_error():
         set_config_value("bogus_key", "x")
 
 
+def test_set_council_lead_accepts_a_well_formed_provider_model_string():
+    set_config_value("council_lead", "anthropic:claude-opus-4-8")
+    assert list_config()["council_lead"] == "anthropic:claude-opus-4-8"
+
+
+def test_set_council_lead_accepts_a_bare_model_name():
+    # A bare name (no ':') is legitimately valid -- mazu.llm.client._split_model
+    # treats it as an Anthropic model, matching MAZU_MODEL=claude-opus-4-8-style
+    # config that predates the multi-provider "provider:model" naming.
+    set_config_value("council_lead", "claude-opus-4-8")
+    assert list_config()["council_lead"] == "claude-opus-4-8"
+
+
+def test_set_council_lead_rejects_an_empty_provider_half():
+    # Real bug found live: the generic Config "Set a value" form accepted
+    # council_lead/council_models with zero validation, so a typo like this
+    # silently saved and only surfaced later as a confusing, disconnected
+    # failure the next time Council actually ran.
+    with pytest.raises(ValueError, match="malformed"):
+        set_config_value("council_lead", ":claude-opus-4-8")
+
+
+def test_set_council_lead_rejects_an_empty_model_half():
+    with pytest.raises(ValueError, match="malformed"):
+        set_config_value("council_lead", "anthropic:")
+
+
+def test_set_council_lead_rejects_an_empty_value():
+    with pytest.raises(ValueError, match="empty"):
+        set_config_value("council_lead", "")
+
+
+def test_set_council_models_validates_every_comma_separated_entry():
+    set_config_value("council_models", "anthropic:claude-sonnet-5,openai:gpt-5")
+    assert list_config()["council_models"] == "anthropic:claude-sonnet-5,openai:gpt-5"
+
+    with pytest.raises(ValueError, match="malformed"):
+        set_config_value("council_models", "anthropic:claude-sonnet-5,openai:")
+
+
 def test_set_overwrites_existing_value():
     set_config_value("default_model", "anthropic:claude-opus-4-8")
     set_config_value("default_model", "deepseek:deepseek-chat")

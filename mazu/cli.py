@@ -505,6 +505,16 @@ def chat(
             return
         session_id = resume_session_id
         click.echo(f"Resuming chat {session_id} ({len(resumed_messages)} prior message(s)).")
+        if model is None:
+            # Real bug found live: without this, resuming always fell back to
+            # --model/MAZU_MODEL/default_model() as if the session had never used
+            # anything else -- silently reverting a conversation that had been
+            # switched to a different model mid-chat back to whatever the FIRST
+            # turn used. An explicit --model on THIS invocation still wins (it's
+            # the more specific, just-stated intent).
+            stored_session = chat_store.get_session(resume_session_id)
+            if stored_session is not None and stored_session["model"]:
+                model = stored_session["model"]
     else:
         session_id = str(uuid.uuid4())
 

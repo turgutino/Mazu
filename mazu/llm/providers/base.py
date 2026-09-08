@@ -30,6 +30,32 @@ class Provider(ABC):
     # base OpenAI shares with DeepSeek/local) actually send it upstream.
     supports_reasoning_effort: bool = False
 
+    def supports_reasoning_effort_for(self, model_name: str) -> bool:
+        """Finer-grained than the class-level flag above: some providers whose API
+        genuinely accepts `reasoning_effort` only do so for a subset of their own
+        models (OpenAI: o-series/gpt-5 "reasoning models" accept it, gpt-4o and
+        similar "chat models" reject it with a 400 -- see OpenAIProvider's
+        override). Defaults to just returning the class-level flag, which is
+        already model-independent for every provider that doesn't override this
+        (Anthropic, Gemini: every model in the family accepts it; DeepSeek/local:
+        no model does). `model_name` is the bare model id, no "provider:" prefix.
+        """
+        return self.supports_reasoning_effort
+
+    def supports_vision_for(self, model_name: str) -> bool:
+        """Best-effort, UI-only signal (mazu-web's attach-button warning) for
+        whether `model_name` can actually see an attached image -- NOT consulted
+        by run_turn/run_turn_stream themselves, which convert and send image
+        blocks unconditionally regardless of this (see
+        mazu/agent/context.py-adjacent image handling). Defaults to True
+        (fail open): most current models across every provider here are
+        multimodal, so assuming support is the safer default direction --
+        a provider overrides this only where it has good reason to believe a
+        real, common subset of its OWN models is text-only (see
+        DeepSeekProvider's override for a concrete example).
+        """
+        return True
+
     @abstractmethod
     def run_turn(
         self, messages: list[dict], system: str, tools: list[dict], model: str,

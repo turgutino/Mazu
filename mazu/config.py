@@ -166,11 +166,46 @@ def list_config() -> dict:
     return _read_raw_config()
 
 
+def _validate_model_entry(key: str, entry: str) -> None:
+    """Best-effort typo catcher for "provider:model"-shaped config values -- NOT
+    a strict format requirement: a bare name with no ':' is legitimately valid
+    (mazu.llm.client._split_model treats it as an Anthropic model, matching
+    MAZU_MODEL=claude-opus-4-8-style config that predates this multi-provider
+    naming). Only rejects a colon that's clearly a mistake -- an empty provider
+    or model half (e.g. "gpt4:" or ":claude-sonnet-5") -- or an empty entry.
+    Real bug found live: council_models/council_lead accepted anything through
+    the generic Config "Set a value" form with zero validation, so a typo
+    silently got saved and only surfaced later as a confusing, disconnected
+    failure the next time Council actually ran.
+    """
+    entry = entry.strip()
+    if not entry:
+        raise ValueError(f"'{key}' contains an empty model entry.")
+    if ":" in entry:
+        provider_part, _, model_part = entry.partition(":")
+        if not provider_part.strip() or not model_part.strip():
+            raise ValueError(
+                f"'{key}' entry '{entry}' looks malformed -- expected \"provider:model\" "
+                f'(e.g. "anthropic:claude-sonnet-5"), or a bare model name to default to Anthropic.'
+            )
+
+
+# Keys expected to hold "provider:model" (optionally comma-separated) --
+# validated lightly by _validate_model_entry above before being written.
+_SINGLE_MODEL_CONFIG_KEYS = {"council_lead"}
+_MODEL_LIST_CONFIG_KEYS = {"council_models"}
+
+
 def set_config_value(key: str, value: str) -> None:
     if key not in KNOWN_CONFIG_KEYS:
         raise ValueError(
             f"Unknown config key '{key}'. Known keys: {', '.join(sorted(KNOWN_CONFIG_KEYS))}"
         )
+    if key in _SINGLE_MODEL_CONFIG_KEYS:
+        _validate_model_entry(key, value)
+    elif key in _MODEL_LIST_CONFIG_KEYS:
+        for entry in value.split(","):
+            _validate_model_entry(key, entry)
     # Real bug found via live testing: mazu-web runs Flask with threaded=True, so
     # two concurrent /api/config POSTs (or a `mazu` CLI invocation racing a
     # mazu-web request) could each read the same on-disk config, add their own

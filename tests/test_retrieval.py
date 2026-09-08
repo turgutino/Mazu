@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
+import mazu.memory.retrieval as retrieval
 from mazu.memory.retrieval import (
     _rank_by_relevance,
     build_context_block,
@@ -262,3 +263,65 @@ def test_explain_retrieval_reports_bm25_score(store: MemoryStore, monkeypatch):
 
 def test_explain_retrieval_empty_store_returns_empty_list(store: MemoryStore):
     assert explain_retrieval(store, query="anything") == []
+
+
+# ---------------------------------------------------------------------------
+# CONTEXT_CHAR_BUDGET vs. floor rows (pinned / recent mistakes) -- real bug
+# found live: ALL rows, floor included, shared one running char_count across
+# every category in whatever order categories happened to be encountered, so
+# an earlier-processed category's ranked entries could exhaust the budget
+# before a LATER category's pinned row was ever reached -- silently dropping
+# it, while `mazu memory why` kept claiming (unconditionally) that every
+# pinned row WOULD be included regardless.
+# ---------------------------------------------------------------------------
+
+
+def test_pinned_memory_in_a_later_processed_category_is_never_dropped(store: MemoryStore, monkeypatch):
+    monkeypatch.delenv("MAZU_SEMANTIC_MEMORY", raising=False)
+    monkeypatch.setattr(retrieval, "CONTEXT_CHAR_BUDGET", 400)
+
+    # Pinned OLDER (so store.pinned()'s created_at DESC order processes "fact"
+    # first) -- an unrelated pin just to occupy a second, later-processed
+    # category.
+    convention_id = store.add(category="convention", title="convention pin", body="c" * 20, pinned=True)
+    fact_id = store.add(category="fact", title="fact pin", body="f" * 20, pinned=True)
+    # Bulk ranked (non-pinned) "fact" entries -- rendered right after the fact
+    # pin, in the SAME category block (floor rows always precede ranked rows
+    # of the same category) -- deliberately large enough to blow well past the
+    # 400-char budget on their own.
+    for i in range(5):
+        store.add(category="fact", title=f"filler {i}", body="y" * 200)
+
+    block = build_context_block(store, query="")
+    assert f"[id {fact_id}]" in block
+    assert f"[id {convention_id}]" in block  # the row that used to get silently dropped
+
+    explanations = explain_retrieval(store, query="")
+    convention_entry = next(e for e in explanations if e["row"]["id"] == convention_id)
+    assert convention_entry["included"] is True
+    assert convention_entry["reason"] == "pinned"
+
+
+def test_a_ranked_row_cut_for_budget_is_reported_as_such_by_explain_retrieval(
+    store: MemoryStore, monkeypatch
+):
+    monkeypatch.delenv("MAZU_SEMANTIC_MEMORY", raising=False)
+    monkeypatch.setattr(retrieval, "CONTEXT_CHAR_BUDGET", 300)
+
+    # all_active() orders most-recently-added first, and with no query
+    # _rank_by_relevance falls back to that same recency order -- so the
+    # LATER-added row here (kept_id) is ranked/rendered BEFORE cut_id.
+    cut_id = store.add(category="fact", title="a much longer fact", body="z" * 400)
+    kept_id = store.add(category="fact", title="short fact", body="short body")
+
+    block = build_context_block(store, query="")
+    assert f"[id {kept_id}]" in block
+    assert f"[id {cut_id}]" not in block
+
+    explanations = explain_retrieval(store, query="")
+    cut_entry = next(e for e in explanations if e["row"]["id"] == cut_id)
+    # Before this fix, explain_retrieval never modeled the char budget at all,
+    # so a row within the top-`limit` candidates was always reported
+    # "included" even when build_context_block would actually cut it.
+    assert cut_entry["included"] is False
+    assert cut_entry["reason"] == "cut for char budget"

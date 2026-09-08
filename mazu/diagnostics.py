@@ -136,6 +136,40 @@ def check_live_api_key(provider_name: str, model: str) -> CheckResult:
     return CheckResult(f"{provider_name} (live)", "ok", "authenticated successfully")
 
 
+def check_curator_live_key() -> CheckResult:
+    """Same idea as check_live_api_key, but through Curator's own isolated client
+    (mazu.curator.client.run_curator_turn) instead of the shared mazu.llm.client
+    provider singletons.
+
+    Real bug found live: `mazu doctor --live` / the web Doctor tab's "Also verify
+    keys" checkbox implied every key-related line got a real check, but Curator
+    authenticates through a completely separate key/provider instance (see
+    curator/client.py's docstring on why it can never share the main _PROVIDERS
+    dict) -- so run_diagnostics()'s live loop, which only iterates
+    mazu.llm.client._PROVIDERS, structurally could never reach it. check_curator()
+    itself is also purely static (reads config, never calls anything). Result: the
+    curator status line looked identical whether --live was passed or not, with no
+    indication that Curator's key had never actually been exercised.
+
+    Only meaningful to call once curator_configured() is true (both key and model
+    set) -- callers check that first, same as the rest of Curator's call sites.
+    """
+    from mazu.curator.client import run_curator_turn
+    from mazu.llm.errors import MazuAPIError, MazuAuthError
+
+    try:
+        run_curator_turn(
+            messages=[{"role": "user", "content": "hi"}],
+            system="Reply with a single word.",
+            tools=[],
+        )
+    except MazuAuthError as e:
+        return CheckResult("curator (live)", "fail", f"key rejected: {e}")
+    except MazuAPIError as e:
+        return CheckResult("curator (live)", "warn", f"couldn't verify (non-auth error): {e}")
+    return CheckResult("curator (live)", "ok", "authenticated successfully")
+
+
 def check_project_git_repo(root: Path) -> CheckResult:
     if (root / ".git").exists():
         return CheckResult("Project git repo", "ok", "initialized")
@@ -184,6 +218,7 @@ def run_diagnostics(root: Path, live: bool = False) -> list[CheckResult]:
         check_curator(),
     ]
     if live:
+        from mazu.curator.config import curator_configured
         from mazu.llm.client import _PROVIDER_DEFAULT_MODELS, _PROVIDERS
 
         for provider_name, provider in _PROVIDERS.items():
@@ -191,6 +226,8 @@ def run_diagnostics(root: Path, live: bool = False) -> list[CheckResult]:
                 results.append(
                     check_live_api_key(provider_name, _PROVIDER_DEFAULT_MODELS[provider_name])
                 )
+        if curator_configured():
+            results.append(check_curator_live_key())
     return results
 
 
