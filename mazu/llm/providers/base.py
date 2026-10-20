@@ -1,3 +1,4 @@
+import threading
 from abc import ABC, abstractmethod
 from typing import Callable
 
@@ -21,6 +22,33 @@ class Provider(ABC):
 
     api_key_env: str
     requires_api_key: bool = True
+
+    def __init__(self):
+        # `_client` is lazily built on first real use (mazu-web/mazu-windows run
+        # every chat/run/explore/council session on its own thread, all sharing
+        # this same Provider instance via client.py's module-level _PROVIDERS
+        # dict), so the very first call from more than one thread at once could
+        # previously race: both threads see `_client is None` and both construct
+        # an SDK client concurrently, which corrupted process state badly enough
+        # to crash Windows with a native heap-corruption exception (0xc0000374)
+        # inside concurrent `ssl.create_default_context()` calls. The lock plus
+        # re-check after acquiring it (`_get_or_create_client` below) is the
+        # standard double-checked-locking fix -- cheap after the first call,
+        # since later calls just read the already-set `_client` without ever
+        # touching the lock.
+        self._client = None
+        self._client_lock = threading.Lock()
+
+    def _get_or_create_client(self, factory: Callable[[], object]):
+        """Thread-safe lazy-init helper shared by every provider's `_get_client()`.
+        `factory` is called at most once per instance, even if many threads call
+        this concurrently on their very first request.
+        """
+        if self._client is None:
+            with self._client_lock:
+                if self._client is None:
+                    self._client = factory()
+        return self._client
 
     # Whether this provider can act on the `effort` parameter below at all
     # ("low"/"medium"/"high"). False by default -- DeepSeek's and a local server's

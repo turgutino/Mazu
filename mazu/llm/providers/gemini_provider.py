@@ -186,11 +186,11 @@ class GeminiProvider(Provider):
     supports_reasoning_effort = True
 
     def __init__(self):
-        self._client = None
+        super().__init__()
         self.api_key_env = "GEMINI_API_KEY"
 
     def _get_client(self):
-        if self._client is None:
+        def factory():
             try:
                 from google import genai
                 from google.genai import types
@@ -215,10 +215,9 @@ class GeminiProvider(Provider):
             # timeout matters here at all (a stalled request previously hung forever
             # with the SDK's own default, caught live via an 8+ minute unresponsive
             # mazu-web chat session).
-            self._client = genai.Client(
-                api_key=api_key, http_options=types.HttpOptions(timeout=120_000)
-            )
-        return self._client
+            return genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=120_000))
+
+        return self._get_or_create_client(factory)
 
     def run_turn(
         self, messages: list[dict], system: str, tools: list[dict], model: str,

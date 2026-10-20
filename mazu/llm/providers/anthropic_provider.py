@@ -90,11 +90,11 @@ class AnthropicProvider(Provider):
     supports_reasoning_effort = True
 
     def __init__(self):
-        self._client = None
+        super().__init__()
         self.api_key_env = "ANTHROPIC_API_KEY"
 
     def _get_client(self):
-        if self._client is None:
+        def factory():
             from anthropic import Anthropic
 
             api_key = os.environ.get(self.api_key_env)
@@ -108,8 +108,9 @@ class AnthropicProvider(Provider):
                     "real API key. It looks like it was set to a placeholder or example "
                     f"value by mistake. Set {self.api_key_env} to your actual key and try again."
                 )
-            self._client = Anthropic(api_key=api_key, timeout=_REQUEST_TIMEOUT_SECONDS)
-        return self._client
+            return Anthropic(api_key=api_key, timeout=_REQUEST_TIMEOUT_SECONDS)
+
+        return self._get_or_create_client(factory)
 
     def run_turn(
         self, messages: list[dict], system: str, tools: list[dict], model: str,
