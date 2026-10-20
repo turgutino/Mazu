@@ -24,6 +24,10 @@ class LocalProvider(OpenAICompatibleProvider):
         )
 
     def _get_client(self):
+        # Resolving base_url is idempotent and cheap, so it's fine if more than one
+        # thread races through this before the first client actually gets built --
+        # the client construction itself is still serialized by the locked
+        # double-checked-init in OpenAICompatibleProvider._get_client's factory.
         if self._client is None:
             from mazu.config import local_base_url
 

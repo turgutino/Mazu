@@ -132,14 +132,14 @@ class OpenAICompatibleProvider(Provider):
         provider_label: str,
         requires_api_key: bool = True,
     ):
-        self._client = None
+        super().__init__()
         self.base_url = base_url
         self.api_key_env = api_key_env
         self.provider_label = provider_label
         self.requires_api_key = requires_api_key
 
     def _get_client(self):
-        if self._client is None:
+        def factory():
             try:
                 from openai import OpenAI
             except ImportError as e:
@@ -176,8 +176,9 @@ class OpenAICompatibleProvider(Provider):
                 # the env var (e.g. a local proxy that actually checks a token),
                 # their real value is used instead.
                 api_key = os.environ.get(self.api_key_env) or "not-needed"
-            self._client = OpenAI(api_key=api_key, base_url=self.base_url, timeout=self.REQUEST_TIMEOUT_SECONDS)
-        return self._client
+            return OpenAI(api_key=api_key, base_url=self.base_url, timeout=self.REQUEST_TIMEOUT_SECONDS)
+
+        return self._get_or_create_client(factory)
 
     def _effort_kwargs(self, effort: str | None) -> dict:
         """Only OpenAIProvider overrides `supports_reasoning_effort` to True --
