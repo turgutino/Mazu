@@ -2258,5 +2258,60 @@ def skills_forget(name: str) -> None:
         click.echo(f"No skill named '{name}'.")
 
 
+@main.group("bench")
+def bench_group() -> None:
+    """Measure Mazu itself: replay a fixed task suite under one or more configs,
+    several times each, and compare pass rate and cost per solved task. Every trial
+    runs in a fresh clone with a throwaway HOME (your real ~/.mazu is untouched) and
+    is judged by the task's own verify command, not by the agent's claims."""
+
+
+@bench_group.command("run")
+@click.option("--suite", "suite_path", required=True, type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              help="JSON list of tasks: id, repo (local git path), prompt, verify_command, optional max_steps/ref.")
+@click.option("--configs", "configs_path", required=True, type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              help="JSON list of configs: name, optional model, extra_args (list), env (object).")
+@click.option("--repeats", default=3, show_default=True, type=click.IntRange(min=1),
+              help="Trials per (task, config). Run-to-run variance is large; 1 repeat proves nothing.")
+@click.option("--out", "results_path", default=Path("bench-results.jsonl"), show_default=True, type=click.Path(path_type=Path),
+              help="Append-only results file. Re-running resumes: already-recorded trials are skipped.")
+@click.option("--agent-timeout", default=1800, show_default=True, type=int, help="Seconds before one agent run is killed.")
+def bench_run(suite_path: Path, configs_path: Path, repeats: int, results_path: Path, agent_timeout: int) -> None:
+    """Run the suite. THIS MAKES REAL, BILLED MODEL CALLS: tasks x configs x repeats runs."""
+    from mazu.bench.runner import load_results, run_suite
+    from mazu.bench.spec import load_configs, load_suite
+    from mazu.bench.stats import format_report, summarize
+
+    try:
+        tasks = load_suite(suite_path)
+        configs = load_configs(configs_path)
+    except ValueError as e:
+        raise click.ClickException(str(e))
+
+    total = len(tasks) * len(configs) * repeats
+    click.echo(f"{len(tasks)} task(s) x {len(configs)} config(s) x {repeats} repeat(s) = {total} trial(s) (real model calls).")
+
+    def _progress(r: dict) -> None:
+        verdict = "PASS" if r["passed"] else ("ERROR" if r.get("error") else "fail")
+        click.echo(f"  [{r['repeat'] + 1}] {r['task']} / {r['config']}: {verdict}  ${r.get('cost_usd') or 0:.4f}  {r.get('duration_s', 0)}s")
+
+    run_suite(tasks, configs, repeats, results_path, agent_timeout=agent_timeout, on_result=_progress)
+    click.echo("")
+    click.echo(format_report(summarize(load_results(results_path))))
+
+
+@bench_group.command("report")
+@click.argument("results_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+def bench_report(results_path: Path) -> None:
+    """Summarize a results file: pass rate with 95% interval, cost, and cost per solved task."""
+    from mazu.bench.runner import load_results
+    from mazu.bench.stats import format_report, summarize
+
+    results = load_results(results_path)
+    if not results:
+        raise click.ClickException("No trials recorded in that file.")
+    click.echo(format_report(summarize(results)))
+
+
 if __name__ == "__main__":
     main()
