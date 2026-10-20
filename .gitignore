@@ -45,3 +45,7 @@ Thumbs.db
 
 # Claude Code's own local session state — not part of the project
 .claude/
+
+# mazu bench scratch output
+bench-work/
+bench-results*.jsonl
