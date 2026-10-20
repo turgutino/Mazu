@@ -20,6 +20,15 @@ _CONTEXT_LENGTH_HINTS = (
 
 
 def classify_sdk_error(sdk, error: Exception) -> MazuAPIError:
+    if isinstance(error, TypeError):
+        # The SDK builds a client fine with no key and only fails at request time with
+        # a bare TypeError. Anything else is a real bug and must propagate unchanged.
+        if "authentication method" in str(error):
+            return MazuAuthError(
+                "No API key is set for this provider (the SDK found no api_key or "
+                "auth_token). Set the provider's API key and try again."
+            )
+        raise error
     if isinstance(error, sdk.RateLimitError):
         return MazuRateLimitError(str(error))
     if isinstance(error, sdk.AuthenticationError):

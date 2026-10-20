@@ -134,7 +134,7 @@ class AnthropicProvider(Provider):
                 tools=_with_tool_cache_control(tools),
                 **_effort_kwargs(effort),
             )
-        except anthropic.AnthropicError as e:
+        except (anthropic.AnthropicError, TypeError) as e:
             raise classify_sdk_error(anthropic, e) from e
         return AgentResponse(
             stop_reason=response.stop_reason,
@@ -176,7 +176,7 @@ class AnthropicProvider(Provider):
                 # path below -- streaming only changes *when* text is delivered, not how
                 # the final content blocks (including tool_use) are built.
                 final = stream.get_final_message()
-        except anthropic.AnthropicError as e:
+        except (anthropic.AnthropicError, TypeError) as e:
             raise classify_sdk_error(anthropic, e) from e
         return AgentResponse(
             stop_reason=final.stop_reason,
@@ -205,7 +205,7 @@ class AnthropicProvider(Provider):
                 tools=[tool],
                 tool_choice={"type": "tool", "name": tool["name"]},
             )
-        except anthropic.AnthropicError as e:
+        except (anthropic.AnthropicError, TypeError) as e:
             raise classify_sdk_error(anthropic, e) from e
         usage = response.usage.model_dump()
         for block in response.content:
@@ -221,6 +221,6 @@ class AnthropicProvider(Provider):
             # The SDK's returned page auto-fetches subsequent pages as it's
             # iterated, so this collects the full catalog, not just the first page.
             models = [m.id for m in client.models.list()]
-        except anthropic.AnthropicError as e:
+        except (anthropic.AnthropicError, TypeError) as e:
             raise classify_sdk_error(anthropic, e) from e
         return sorted(models, reverse=True)
