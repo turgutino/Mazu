@@ -11,8 +11,8 @@ PRICING_PER_MILLION_TOKENS: dict[str, tuple[float, float]] = {
     "anthropic:claude-opus-4-8": (15.0, 75.0),
     "anthropic:claude-sonnet-5": (3.0, 15.0),
     "anthropic:claude-haiku-4-5": (0.8, 4.0),
-    "openai:gpt-5": (5.0, 15.0),
-    "openai:gpt-5-mini": (0.5, 2.0),
+    "openai:gpt-5": (1.25, 10.0),  # verified against developers.openai.com/api/docs/pricing, 2026-10-20
+    "openai:gpt-5-mini": (0.25, 2.0),
     "deepseek:deepseek-chat": (0.27, 1.1),
     "deepseek:deepseek-reasoner": (0.55, 2.19),
     # best-effort — verify against provider docs before relying on these for real budgeting
