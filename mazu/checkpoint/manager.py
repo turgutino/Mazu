@@ -55,6 +55,22 @@ class CheckpointManager:
         return (self.root / ".git").exists()
 
     def ensure_git_repo(self) -> None:
+        # Every real caller (cli.py) also calls diagnostics.ensure_gitignore() before
+        # touching checkpoints, but that's an external convention this class can't
+        # enforce -- a caller that skips it (a third-party embedder, a test, an
+        # already-existing repo where .mazu/ predates this mechanism) ends up with
+        # .mazu/memory.db tracked by git. restore()'s `git reset --hard` then tries to
+        # overwrite that tracked file on disk, which on Windows fails outright
+        # ("unable to unlink old '.mazu/memory.db': Invalid argument") the instant
+        # anything else -- another MemoryStore connection, an editor, antivirus --
+        # has the file open, since Windows won't let git unlink/replace an in-use
+        # file the way POSIX does. Calling it here too, on every ensure_git_repo(),
+        # closes that gap at the source regardless of caller discipline: .mazu/ is
+        # excluded before the first `git add -A` ever runs, so git never tracks
+        # memory.db and never tries to touch it during a hard reset.
+        from mazu.diagnostics import ensure_gitignore
+
+        ensure_gitignore(self.root)
         if self.is_git_repo():
             return
         _git(self.root, ["init"])
@@ -494,10 +510,25 @@ class CheckpointManager:
         if entry is None:
             raise ValueError(f"No checkpoint found for id={checkpoint_id!r}")
 
-        _git(self.root, ["reset", "--hard", entry["git_commit"]])
+        # Both checked explicitly rather than fire-and-forget: a failure here used to
+        # be silently swallowed, so a botched reset (e.g. git can't unlink a file
+        # something else has open) left the live tree in its PRE-rollback state while
+        # the rest of restore() carried on as if the rollback had succeeded --
+        # reporting success for a restore that changed nothing.
+        reset_result = _git(self.root, ["reset", "--hard", entry["git_commit"]])
+        if reset_result.returncode != 0:
+            raise RuntimeError(
+                f"git reset --hard failed while restoring checkpoint {checkpoint_id!r}: "
+                f"{reset_result.stderr.strip() or reset_result.stdout.strip()}"
+            )
         # Removes untracked files created after this checkpoint. Respects .gitignore
-        # by default, so .mazu/ (which mazu init/chat always gitignores) is untouched.
-        _git(self.root, ["clean", "-fd"])
+        # by default, so .mazu/ (which ensure_git_repo() always gitignores) is untouched.
+        clean_result = _git(self.root, ["clean", "-fd"])
+        if clean_result.returncode != 0:
+            raise RuntimeError(
+                f"git clean -fd failed while restoring checkpoint {checkpoint_id!r}: "
+                f"{clean_result.stderr.strip() or clean_result.stdout.strip()}"
+            )
 
         checkpoint_dir = self.checkpoints_dir / entry["id"]
         snapshot_db = checkpoint_dir / "memory.db"

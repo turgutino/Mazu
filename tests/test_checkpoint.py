@@ -75,6 +75,52 @@ def test_rollback_restores_memory_db(project: Path):
     assert titles == {"Before checkpoint"}
 
 
+def test_rollback_restores_memory_db_with_concurrent_open_connection(tmp_path: Path):
+    """Regression test for a real, deterministically-reproduced bug: a long-lived
+    caller (mazu-windows' Memory page, mazu-web's ChatSession) keeps a MemoryStore
+    connection open for the app's/session's whole lifetime, not just per-call like
+    the CLI. On Windows, if memory.db is ever tracked by git (e.g. a project whose
+    .gitignore predates `.mazu/`, or an embedder that builds a CheckpointManager
+    directly without first calling diagnostics.ensure_gitignore()), `git reset
+    --hard` cannot unlink a file another connection has open and used to fail
+    *silently* -- restore() didn't check the subprocess result, so it looked like a
+    successful no-op restore instead of a loud error. This test deliberately skips
+    the `project` fixture's pre-seeded .gitignore, to exercise CheckpointManager's
+    own protection (ensure_git_repo() now calls ensure_gitignore() itself) rather
+    than relying on the caller to have done it.
+    """
+    from mazu.memory.store import MemoryStore
+
+    project = tmp_path
+    mazu_dir = project / ".mazu"
+    mazu_dir.mkdir()
+    store = MemoryStore(mazu_dir / "memory.db")
+    store.add(category="fact", title="Before checkpoint", body="x")
+    store.close()
+
+    manager = CheckpointManager(project)
+    entry = manager.snapshot(messages=[], trigger="manual")
+
+    store = MemoryStore(mazu_dir / "memory.db")
+    store.add(category="fact", title="After checkpoint", body="y")
+    store.close()
+
+    # The trigger: an idle, already-settled connection kept open across the
+    # restore -- no pending query, no explicit transaction, nothing unusual, just
+    # the normal state of a long-running chat session or UI page.
+    idle_store = MemoryStore(mazu_dir / "memory.db")
+    idle_store.stats()
+    try:
+        manager.restore(entry["id"])
+    finally:
+        idle_store.close()
+
+    store = MemoryStore(mazu_dir / "memory.db")
+    titles = {row["title"] for row in store.all_active()}
+    store.close()
+    assert titles == {"Before checkpoint"}
+
+
 def test_rollback_restores_skills(project: Path):
     from mazu.skills.manager import SkillManager
 
