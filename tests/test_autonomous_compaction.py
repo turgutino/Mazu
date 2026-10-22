@@ -15,7 +15,10 @@ from mazu.agent.autonomous import run_autonomous
 from mazu.checkpoint.manager import CheckpointManager
 from mazu.llm.errors import MazuContextLengthError
 from mazu.llm.types import AgentResponse
+from mazu.agent.council import _SharedCostTracker
+from mazu.memory.store import MemoryStore
 from mazu.tools.registry import ToolRegistry
+from mazu.usage.store import UsageStore
 
 
 @pytest.fixture(autouse=True)
@@ -115,3 +118,41 @@ def test_context_length_error_on_retry_counts_as_a_failure(tmp_path, monkeypatch
     )
     # No assertion needed beyond "didn't raise" -- reaching this line means the
     # error was handled gracefully instead of crashing the process.
+
+
+def test_max_cost_counts_compaction_and_final_memory_extraction(tmp_path, monkeypatch):
+    usage_store = UsageStore(tmp_path / "usage.db")
+    memory_store = MemoryStore(tmp_path / "memory.db")
+    tracker = _SharedCostTracker(0.06)
+
+    def _compact(messages, model, usage_store=None, session_id=None, **kwargs):
+        usage_store.log("compaction", session_id, "anthropic", "claude-haiku-4-5", 1, 1, 0.04)
+        return messages, False
+
+    def _run_turn(*args, **kwargs):
+        return AgentResponse(
+            stop_reason="tool_use",
+            content=[{"type": "tool_use", "id": "tool-1", "name": "missing", "input": {}}],
+            usage={"input_tokens": 10_000, "output_tokens": 0},
+        )
+
+    def _finalize(store, session_id, messages, usage_store=None, **kwargs):
+        usage_store.log("memory_extraction", session_id, "anthropic", "claude-haiku-4-5", 1, 1, 0.02)
+        store.close()
+        return 0
+
+    monkeypatch.setattr(autonomous_module, "compact_if_needed", _compact)
+    monkeypatch.setattr(autonomous_module, "run_turn", _run_turn)
+    monkeypatch.setattr(autonomous_module, "finalize_session", _finalize)
+
+    run_autonomous(
+        registry=ToolRegistry(), task="continue", session_id="s1",
+        checkpoint_manager=CheckpointManager(tmp_path), memory_store=memory_store,
+        usage_store=usage_store, model="anthropic:claude-sonnet-5", max_cost=0.05,
+        max_steps=2, shared_cost_tracker=tracker,
+    )
+
+    summary = UsageStore(tmp_path / "usage.db").summary(session_id="s1")
+    assert summary["total_cost"] == pytest.approx(0.09)
+    assert summary["total_calls"] == 3
+    assert tracker.total == pytest.approx(0.09)

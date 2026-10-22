@@ -997,11 +997,12 @@ def test_chat_shell_allowlist_flag_reaches_run_chat_loop(tmp_path, monkeypatch):
 
     runner = CliRunner()
     result = runner.invoke(
-        main, ["chat", "--shell-allowlist", "git,npm", "--model", "deepseek:deepseek-chat"]
+        main, ["chat", "--shell-allowlist", "git,npm", "--model", "deepseek:deepseek-chat", "--max-cost", "0.5"]
     )
 
     assert result.exit_code == 0, result.output
     assert captured["shell_allowlist"] == ["git", "npm"]
+    assert captured["max_cost"] == 0.5
 
 
 def test_run_help_documents_dry_run_and_shell_allowlist():

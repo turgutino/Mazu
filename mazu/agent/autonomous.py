@@ -128,6 +128,9 @@ def run_autonomous(
     provider_name, model_name = _split_model(model or default_model())
     resolved_model = f"{provider_name}:{model_name}"
     cost_trackable = estimate_cost(resolved_model, 0, 0) is not None
+    track_auxiliary_cost = cost_trackable and (
+        max_cost is not None or shared_cost_tracker is not None
+    )
     if max_cost is not None and not cost_trackable:
         print(
             f"[cost] warning: no pricing data for '{resolved_model}' — --max-cost can't be "
@@ -166,7 +169,11 @@ def run_autonomous(
     consecutive_failures = 0
     total_in = 0
     total_out = 0
-    total_cost = 0.0
+    usage_cost_seen = (
+        usage_store.summary(session_id=session_id)["total_cost"]
+        if track_auxiliary_cost and usage_store is not None else 0.0
+    )
+    total_cost = usage_cost_seen
     checkpoints_created = 0
     stop_reason: str | None = None
     # Only the very first snapshot of a forked run needs an explicit
@@ -176,8 +183,44 @@ def run_autonomous(
     first_checkpoint_of_run = True
     try:
         while step < max_steps:
+            if max_cost is not None and cost_trackable and total_cost >= max_cost:
+                print(
+                    f"\nStopping: estimated run cost ~${total_cost:.4f} reached the "
+                    f"--max-cost limit (${max_cost:.2f})."
+                )
+                stop_reason = "max_cost"
+                break
+            if shared_cost_tracker is not None and shared_cost_tracker.is_exhausted():
+                print("\nStopping: the shared --max-cost budget across all explore branches was reached.")
+                stop_reason = "shared_max_cost"
+                break
             step += 1
-            messages, compacted = compact_if_needed(messages, model)
+            if track_auxiliary_cost:
+                messages, compacted = compact_if_needed(
+                    messages, model, usage_store=usage_store, session_id=session_id,
+                )
+            else:
+                messages, compacted = compact_if_needed(messages, model)
+            if track_auxiliary_cost and usage_store is not None:
+                current_usage_cost = usage_store.summary(session_id=session_id)["total_cost"]
+                compaction_cost = max(0.0, current_usage_cost - usage_cost_seen)
+                usage_cost_seen = current_usage_cost
+                total_cost += compaction_cost
+                shared_exhausted = (
+                    shared_cost_tracker.add_and_check(compaction_cost)
+                    if shared_cost_tracker is not None else False
+                )
+                if max_cost is not None and total_cost >= max_cost:
+                    print(
+                        f"\nStopping: estimated run cost ~${total_cost:.4f} reached the "
+                        f"--max-cost limit (${max_cost:.2f}) after compaction."
+                    )
+                    stop_reason = "max_cost"
+                    break
+                if shared_exhausted:
+                    print("\nStopping: compaction reached the shared --max-cost budget across explore branches.")
+                    stop_reason = "shared_max_cost"
+                    break
             if compacted:
                 print(f"[context] compacted conversation history ({len(messages)} messages remain)")
             try:
@@ -194,7 +237,32 @@ def run_autonomous(
                             "\n[context] hit the model's context limit — compacting "
                             "aggressively and retrying once"
                         )
-                        messages = force_compact(messages, model)
+                        if track_auxiliary_cost:
+                            messages = force_compact(
+                                messages, model, usage_store=usage_store, session_id=session_id,
+                            )
+                        else:
+                            messages = force_compact(messages, model)
+                        if track_auxiliary_cost and usage_store is not None:
+                            current_usage_cost = usage_store.summary(session_id=session_id)["total_cost"]
+                            compaction_cost = max(0.0, current_usage_cost - usage_cost_seen)
+                            usage_cost_seen = current_usage_cost
+                            total_cost += compaction_cost
+                            shared_exhausted = (
+                                shared_cost_tracker.add_and_check(compaction_cost)
+                                if shared_cost_tracker is not None else False
+                            )
+                            if max_cost is not None and total_cost >= max_cost:
+                                print(
+                                    f"\nStopping: estimated run cost ~${total_cost:.4f} reached the "
+                                    f"--max-cost limit (${max_cost:.2f}) after compaction."
+                                )
+                                stop_reason = "max_cost"
+                                break
+                            if shared_exhausted:
+                                print("\nStopping: compaction reached the shared --max-cost budget across explore branches.")
+                                stop_reason = "shared_max_cost"
+                                break
                         response = run_turn(messages, system_prompt, registry.schemas(), model=model)
                 except MazuAPIError as e:
                     print(f"\n[error] {e}")
@@ -240,6 +308,8 @@ def run_autonomous(
                         "run", session_id, provider_name, model_name, step_in, step_out, step_cost,
                         cache_read_tokens=cache_read_tokens or None, cache_write_tokens=cache_write_tokens or None,
                     )
+                    if track_auxiliary_cost:
+                        usage_cost_seen += step_cost or 0.0
                 print(
                     f"[usage] step: {summarize_usage(usage)} | "
                     f"running total: {total_in} in, {total_out} out{cost_suffix}"
@@ -308,10 +378,20 @@ def run_autonomous(
     finally:
         memories_saved = 0
         if memory_store is not None:
+            usage_cost_before_finalize = (
+                usage_store.summary(session_id=session_id)["total_cost"]
+                if track_auxiliary_cost and usage_store is not None else 0.0
+            )
             memories_saved = finalize_session(
                 memory_store, session_id, messages, model=model, usage_store=usage_store,
                 belief_log=belief_log, dry_run=dry_run,
             )
+            if track_auxiliary_cost and usage_store is not None:
+                usage_cost_after_finalize = usage_store.summary(session_id=session_id)["total_cost"]
+                extraction_cost = max(0.0, usage_cost_after_finalize - usage_cost_before_finalize)
+                total_cost += extraction_cost
+                if shared_cost_tracker is not None:
+                    shared_cost_tracker.add_and_check(extraction_cost)
         if global_memory_store is not None:
             global_memory_store.close()
         if belief_log is not None:

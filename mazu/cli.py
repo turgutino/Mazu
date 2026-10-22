@@ -444,6 +444,14 @@ def config_unset(key: str) -> None:
     "regardless -- this only skips the interactive y/N prompt. Off by default; can also be "
     "toggled mid-session with /auto.",
 )
+@click.option(
+    "--max-cost",
+    default=None,
+    type=float,
+    help="Stop this chat session once estimated spend reaches this many USD. "
+    "Checked after each model call, so the call that reaches the limit is still charged. "
+    "Ignored with a warning if the selected model has no pricing data.",
+)
 def chat(
     model: str | None,
     shell_allowlist: str | None,
@@ -452,6 +460,7 @@ def chat(
     as_json: bool,
     delete_session_id: str | None,
     auto_approve: bool,
+    max_cost: float | None,
 ) -> None:
     """Start an interactive chat session in the current directory."""
     root = Path.cwd()
@@ -537,6 +546,7 @@ def chat(
         shell_allowlist=_parse_shell_allowlist(shell_allowlist),
         belief_log=belief_log,
         auto_approve=auto_approve,
+        max_cost=max_cost,
     )
 
 

@@ -99,6 +99,7 @@ def finalize_session(
     usage_store: UsageStore | None = None,
     belief_log: BeliefShadowLogStore | None = None,
     dry_run: bool = False,
+    skip_extraction: bool = False,
 ) -> int:
     """Runs once at the end of a session: the cheap-model safety net that catches
     whatever the agent forgot to `remember` explicitly during the conversation.
@@ -118,6 +119,11 @@ def finalize_session(
     caller (mazu chat and mazu-web's chat have no dry-run concept at all).
     """
     if dry_run:
+        memory_store.close()
+        return 0
+
+    if skip_extraction:
+        memory_store.end_session(session_id)
         memory_store.close()
         return 0
 

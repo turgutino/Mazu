@@ -74,6 +74,7 @@ def run_chat_loop(
     resumed_messages: list[dict] | None = None,
     belief_log: BeliefShadowLogStore | None = None,
     auto_approve: bool = False,
+    max_cost: float | None = None,
 ) -> None:
     messages: list[dict] = list(resumed_messages) if resumed_messages else []
     # Left None even when resuming: the first new user input still needs its own
@@ -81,7 +82,10 @@ def run_chat_loop(
     # suggestion) exactly like a brand-new session's first message -- resuming
     # only pre-populates prior conversation turns, not this per-process state.
     system_prompt = None
-    total_cost = 0.0
+    total_cost = (
+        usage_store.summary(session_id=session_id)["total_cost"]
+        if max_cost is not None and usage_store is not None else 0.0
+    )
     # A resumed chat reuses the SAME session_id (and therefore the same `sessions`
     # row MemoryStore already has for it, from the original process) --
     # start_session()'s INSERT would violate that row's primary key and crash.
@@ -99,6 +103,15 @@ def run_chat_loop(
     resolved_model = f"{provider_name}:{model_name}"
     cost_trackable = estimate_cost(resolved_model, 0, 0) is not None
     print(f"model: {resolved_model}")
+    if max_cost is not None and not cost_trackable:
+        print(
+            f"[cost] warning: no pricing data for '{resolved_model}' — --max-cost can't be "
+            "enforced for this model and will be ignored."
+        )
+        max_cost = None
+        total_cost = 0.0
+    elif max_cost is not None:
+        print(f"[cost] chat session limit: ${max_cost:.4f} (estimated)")
     print(
         "chat — type your task. Commands: /checkpoint, /rollback [id], /compact, /auto. Ctrl+C to quit.\n"
     )
@@ -108,8 +121,19 @@ def run_chat_loop(
             "tools (shell, file delete, skill delete) will run without asking. Type /auto "
             "to turn it off.\n"
         )
+    cost_limit_reached = False
     try:
+        if max_cost is not None and total_cost >= max_cost:
+            print(f"[cost] stopping: this chat session has already reached --max-cost (${max_cost:.4f}).")
+            cost_limit_reached = True
+            return
         while True:
+            if max_cost is not None and usage_store is not None:
+                total_cost = usage_store.summary(session_id=session_id)["total_cost"]
+                if total_cost >= max_cost:
+                    print(f"[cost] stopping: chat session reached --max-cost (${max_cost:.4f}).")
+                    cost_limit_reached = True
+                    break
             try:
                 user_input = input("> ").strip()
             except (EOFError, KeyboardInterrupt):
@@ -130,6 +154,12 @@ def run_chat_loop(
 
             if user_input == "/compact":
                 _handle_compact(messages, model, memory_store, usage_store, session_id, belief_log)
+                if max_cost is not None and usage_store is not None:
+                    total_cost = usage_store.summary(session_id=session_id)["total_cost"]
+                    if total_cost >= max_cost:
+                        print(f"[cost] stopping: chat session reached --max-cost (${max_cost:.4f}) after compaction.")
+                        cost_limit_reached = True
+                        break
                 continue
 
             if user_input == "/auto":
@@ -164,7 +194,7 @@ def run_chat_loop(
             messages.append({"role": "user", "content": user_input})
             if chat_store is not None:
                 chat_store.append_message(session_id, "user", user_input, model=resolved_model)
-            total_cost = _run_until_done(
+            total_cost, cost_limit_reached = _run_until_done(
                 messages,
                 messages_before_turn,
                 registry,
@@ -181,13 +211,24 @@ def run_chat_loop(
                 memory_store,
                 belief_log,
                 auto_approve_flag[0],
+                max_cost,
             )
+            if cost_limit_reached:
+                break
     finally:
         if memory_store is not None:
             finalize_session(
                 memory_store, session_id, messages, model=model, usage_store=usage_store,
-                belief_log=belief_log,
+                belief_log=belief_log, skip_extraction=cost_limit_reached,
             )
+        if usage_store is not None:
+            summary = usage_store.summary(session_id=session_id)
+            total_cost = summary["total_cost"]
+            if max_cost is not None and total_cost >= max_cost and not cost_limit_reached:
+                cost_limit_reached = True
+                print(f"[cost] chat session reached --max-cost (${max_cost:.4f}) during final memory saving.")
+            elif max_cost is not None and cost_limit_reached and memory_store is not None:
+                print("[cost] skipped final memory extraction to stay within the chat session limit.")
         if global_memory_store is not None:
             global_memory_store.close()
         if usage_store is not None:
@@ -286,7 +327,8 @@ def _run_until_done(
     memory_store: MemoryStore | None = None,
     belief_log: BeliefShadowLogStore | None = None,
     auto_approve: bool = False,
-) -> float:
+    max_cost: float | None = None,
+) -> tuple[float, bool]:
     """`messages_before_turn` is a snapshot of `messages` taken by the caller right
     before this turn's user message was appended -- real bug found via live
     testing (mazu-web's chat, which mirrors this function closely): a turn that
@@ -303,12 +345,20 @@ def _run_until_done(
     """
     provider_name, model_name = _split_model(resolved_model)
     while True:
+        if max_cost is not None and total_cost >= max_cost:
+            print(f"\n[cost] stopping before another model call: chat limit ${max_cost:.4f} reached.")
+            return total_cost, True
         on_compacted = extract_memories_on_compaction(
             memory_store, session_id, model, usage_store=usage_store, belief_log=belief_log
         )
         new_messages, compacted = compact_if_needed(
             messages, model, usage_store=usage_store, session_id=session_id, on_compacted=on_compacted
         )
+        if max_cost is not None and usage_store is not None:
+            total_cost = usage_store.summary(session_id=session_id)["total_cost"]
+            if total_cost >= max_cost:
+                print(f"\n[cost] stopping before another model call: chat limit ${max_cost:.4f} reached after compaction.")
+                return total_cost, True
         if compacted:
             messages[:] = new_messages  # mutate in place -- messages is passed in by reference
             print(
@@ -340,6 +390,11 @@ def _run_until_done(
             messages[:] = force_compact(
                 messages, model, usage_store=usage_store, session_id=session_id, on_compacted=on_compacted
             )
+            if max_cost is not None and usage_store is not None:
+                total_cost = usage_store.summary(session_id=session_id)["total_cost"]
+                if total_cost >= max_cost:
+                    print(f"\n[cost] stopping before retry: chat limit ${max_cost:.4f} reached after compaction.")
+                    return total_cost, True
             try:
                 response = run_turn_stream(
                     messages, system_prompt, registry.schemas(), on_delta=_on_delta, model=model
@@ -347,11 +402,11 @@ def _run_until_done(
             except MazuAPIError as e:
                 messages[:] = messages_before_turn
                 print(f"\n[error] {e}\nReturning to the prompt — try again, or use /rollback.")
-                return total_cost
+                return total_cost, False
         except MazuAPIError as e:
             messages[:] = messages_before_turn
             print(f"\n[error] {e}\nReturning to the prompt — try again, or use /rollback.")
-            return total_cost
+            return total_cost, False
         messages.append({"role": "assistant", "content": response.content})
         if chat_store is not None:
             chat_store.append_message(session_id, "assistant", response.content, model=resolved_model)
@@ -387,10 +442,29 @@ def _run_until_done(
                 "chat", session_id, provider_name, model_name, input_tokens, output_tokens, step_cost,
                 cache_read_tokens=cache_read_tokens or None, cache_write_tokens=cache_write_tokens or None,
             )
+            if max_cost is not None:
+                total_cost = usage_store.summary(session_id=session_id)["total_cost"]
         print(f"[usage] {summarize_usage(usage)}{cost_suffix}")
 
+        if max_cost is not None and total_cost >= max_cost:
+            if response.stop_reason == "tool_use":
+                tool_results = [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": block["id"],
+                        "content": "Not run because the chat session reached its --max-cost limit.",
+                        "is_error": True,
+                    }
+                    for block in response.content if block["type"] == "tool_use"
+                ]
+                messages.append({"role": "user", "content": tool_results})
+                if chat_store is not None:
+                    chat_store.append_message(session_id, "user", tool_results, model=resolved_model)
+            print(f"\n[cost] stopping: chat session reached --max-cost (${max_cost:.4f}).")
+            return total_cost, True
+
         if response.stop_reason != "tool_use":
-            return total_cost
+            return total_cost, False
 
         tool_results = []
         for block in response.content:

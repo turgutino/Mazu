@@ -199,6 +199,50 @@ def test_compaction_logs_real_cost_to_usage_store(tmp_path, monkeypatch):
     assert summary["total_calls"] == 1
 
 
+def test_max_cost_counts_chat_compaction_and_final_memory_extraction(tmp_path, monkeypatch, capsys):
+    registry = ToolRegistry()
+    usage_store = UsageStore(tmp_path / "usage.db")
+    memory_store = MemoryStore(tmp_path / "memory.db")
+
+    def _compact(messages, model, usage_store=None, session_id=None, **kwargs):
+        usage_store.log("compaction", session_id, "deepseek", "deepseek-chat", 1, 1, 0.0002)
+        return messages, False
+
+    def _finalize(store, session_id, messages, usage_store=None, **kwargs):
+        usage_store.log("memory_extraction", session_id, "deepseek", "deepseek-chat", 1, 1, 0.0006)
+        store.close()
+        return 0
+
+    monkeypatch.setattr(loop_module, "compact_if_needed", _compact)
+    monkeypatch.setattr(loop_module, "run_turn_stream", lambda *a, **k: AgentResponse(
+        stop_reason="end_turn", content=[{"type": "text", "text": "done"}],
+        usage={"input_tokens": 1_000, "output_tokens": 0},
+    ))
+    monkeypatch.setattr(loop_module, "finalize_session", _finalize)
+    inputs = iter(["hello"])
+
+    def _input_with_eof(prompt=""):
+        try:
+            return next(inputs)
+        except StopIteration:
+            raise EOFError
+
+    monkeypatch.setattr("builtins.input", _input_with_eof)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-fake")
+
+    run_chat_loop(
+        registry, session_id="s1", model="deepseek:deepseek-chat", usage_store=usage_store,
+        memory_store=memory_store, max_cost=0.001,
+    )
+
+    summary = UsageStore(tmp_path / "usage.db").summary(session_id="s1")
+    assert summary["total_calls"] == 3
+    assert summary["total_cost"] == pytest.approx(0.00107)
+    output = capsys.readouterr().out
+    assert "reached --max-cost" in output
+    assert "final session total" in output
+
+
 def test_handle_compact_shrinks_a_long_conversation(monkeypatch, capsys):
     messages = []
     for i in range(20):
