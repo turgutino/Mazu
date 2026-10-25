@@ -229,6 +229,10 @@ def run_chat_loop(
                 print(f"[cost] chat session reached --max-cost (${max_cost:.4f}) during final memory saving.")
             elif max_cost is not None and cost_limit_reached and memory_store is not None:
                 print("[cost] skipped final memory extraction to stay within the chat session limit.")
+            if summary["total_calls"]:
+                cost = f"~${summary['total_cost']:.4f}"
+                qualifier = " (lower bound; some model prices are unknown)" if summary["has_unpriced_calls"] else ""
+                print(f"[usage] final session total, including memory and compaction: {cost}{qualifier}")
         if global_memory_store is not None:
             global_memory_store.close()
         if usage_store is not None:
@@ -429,7 +433,7 @@ def _run_until_done(
         )
         if step_cost is not None:
             total_cost += step_cost
-            cost_suffix = f" | ~${step_cost:.4f} this message, ~${total_cost:.4f} total"
+            cost_suffix = f" | ~${step_cost:.4f} this call, ~${total_cost:.4f} main chat total"
         else:
             # cost_trackable is False when estimate_cost() has no pricing data for
             # this model (e.g. a newly-discovered live model not in mazu/llm/

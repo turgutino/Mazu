@@ -132,7 +132,7 @@ Inside the `>` prompt, two extra commands are always available:
 | `/checkpoint` | Snapshot code, memory, and the live conversation right now |
 | `/rollback [id]` | Restore all three to that checkpoint (defaults to the most recent one) |
 
-Any destructive tool call (writing a file, editing a file, running a shell command) asks for confirmation first. Responses stream in as they're generated (token-by-token where the provider supports it), and each response's `[usage]` line shows both that message's and the session's running cost where pricing data is available for the current model (and says so plainly when it isn't, instead of just omitting the figure).
+Any destructive tool call (writing a file, editing a file, running a shell command) asks for confirmation first. Responses stream in as they're generated (token-by-token where the provider supports it). Each `[usage]` line shows the model call's and main chat loop's running estimate; when the session exits, a final total includes compaction and memory-extraction calls too. Unknown model prices are called out instead of silently counted as zero.
 
 For providers that support it (Anthropic, OpenAI's o-series/gpt-5 models, Gemini), `mazu config set reasoning_effort low|medium|high` (or `MAZU_REASONING_EFFORT`) controls how much the model reasons before answering. DeepSeek and local models accept the setting but ignore it — there's no per-model request-time gate in the terminal (see `mazu-web`'s equivalent UI control below, which does warn when the current model won't honor it).
 
