@@ -21,9 +21,28 @@ from typing import Callable
 from mazu.bench.spec import Config, Task
 
 
+def remove_tree(path: Path) -> None:
+    """rmtree that also removes read-only files. Git marks object files read-only, and on
+    Windows plain shutil.rmtree(..., ignore_errors=True) silently leaves such a clone behind."""
+    import stat
+
+    def _onexc(func, p, exc):
+        try:
+            os.chmod(p, stat.S_IWRITE)
+            func(p)
+        except OSError:
+            pass
+
+    shutil.rmtree(path, onexc=_onexc)
+
+
 def default_run_agent(clone: Path, task: Task, config: Config, env: dict, timeout: int) -> tuple[int, str]:
     cmd = [
-        sys.executable, "-c", "from mazu.cli import main; main()",
+        # Drop cwd from sys.path first: when the task repo IS a Mazu checkout (a historical
+        # commit), the agent must still run as the Mazu under test, not as that old code.
+        sys.executable, "-c",
+        "import sys; sys.path[:] = [p for p in sys.path if p not in ('', '.')]; "
+        "from mazu.cli import main; main()",
         "run", task.prompt,
         "--max-steps", str(task.max_steps),
         "--allow-shell", "--auto-commit-baseline",
@@ -141,7 +160,7 @@ def run_trial(
         result["error"] = f"{type(e).__name__}: {e}"
     finally:
         result["duration_s"] = round(time.time() - started, 1)
-        shutil.rmtree(trial_dir, ignore_errors=True)
+        remove_tree(trial_dir)
     return result
 
 
@@ -185,7 +204,7 @@ def run_suite(
                     if on_result:
                         on_result(result)
     finally:
-        shutil.rmtree(work_root, ignore_errors=True)
+        remove_tree(work_root)
     return new_results
 
 

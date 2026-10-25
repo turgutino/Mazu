@@ -17,7 +17,9 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from tasks import TASKS  # noqa: E402
+from mazu.bench.runner import remove_tree  # noqa: E402
 
 HIDDEN_HEADER = "import os, sys\nsys.path.insert(0, os.getcwd())\n"
 HIDDEN_FOOTER = "\n\nif __name__ == '__main__':\n    import unittest\n    unittest.main()\n"
@@ -29,7 +31,7 @@ def _git(args, cwd):
 
 def build(out: Path) -> list[dict]:
     if out.exists():
-        shutil.rmtree(out)
+        remove_tree(out)
     (out / "repos").mkdir(parents=True)
     (out / "hidden").mkdir()
     suite = []
@@ -75,7 +77,7 @@ def check(out: Path, suite: list[dict]) -> bool:
         status = "ok" if (broken_fails and fixed_passes) else "BAD"
         print(f"{status:>4}  {t['id']:<26} broken-fails={broken_fails} fixed-passes={fixed_passes}")
         ok = ok and broken_fails and fixed_passes
-    shutil.rmtree(out / "check", ignore_errors=True)
+    remove_tree(out / "check")
     return ok
 
 
