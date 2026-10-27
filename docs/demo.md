@@ -4,6 +4,8 @@ This walks through the scenario Mazu's checkpoint/memory system exists for: an a
 
 **Every command and every line of output below is real** — run against an actual project, actual git history, and actual SQLite stores, not written from memory or invented for illustration. The one thing that *is* scripted (not live): the model's own responses, fed in as fixed, deterministic text instead of a real API call, so this walkthrough reproduces identically every time instead of depending on what a live model happens to say on a given day. Every Mazu mechanic driven by those responses — the git commits, the checkpoints, the SQLite writes, the test failures and passes — is genuinely real, not mocked.
 
+> **Captured on 2026-07-14.** Commands and flags below still exist, but exact output formatting (for example the `mazu timeline` lines, or the `[usage]` lines) may differ slightly in later versions. The model's replies were scripted so the walkthrough is reproducible; the git, checkpoint, and SQLite behavior is real. Since then Mazu also gained `mazu checkpoint show/diff`, branching runs, and `mazu bench`, none of which this walkthrough uses.
+
 ## The setup
 
 A two-file project: `calc.py` with a `divide()` function that deliberately converts `ZeroDivisionError` into a clearer `ValueError`, and `test_calc.py` covering both the normal case and that error-message behavior.

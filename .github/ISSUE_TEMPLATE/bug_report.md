@@ -20,5 +20,8 @@ Paste the full terminal output if possible — including any traceback.
 - Python version: (`python --version`)
 - Provider/model: (e.g. `deepseek:deepseek-chat`, `anthropic:claude-sonnet-5`)
 
+**`mazu doctor` output**
+Paste it if the problem might be setup-related (API keys are not printed).
+
 **Anything else worth knowing?**
 e.g. does it reproduce every time, or only sometimes? Does it involve a large project, a long session, a specific tool?

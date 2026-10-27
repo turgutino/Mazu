@@ -1,6 +1,6 @@
 # Mazu — Promo Video Script (32-47 sec)
 
-Goal: showcase Mazu's three core differentiators — persistent memory, checkpoint/rollback + branching (the one thing no comparable agent does), and free local model support — plus an open-source contributor call-to-action. Minimal jargon, maximum visual impact.
+Goal: showcase what Mazu actually does — persistent project memory, checkpoint/rollback and branching, and the option to run on a local model with no cloud bill — plus an open-source contributor call-to-action. Every claim in the voiceover should be something the README can back up; do not add superlatives or comparisons to other products. Minimal jargon, maximum visual impact.
 
 ---
 
@@ -24,7 +24,7 @@ cinematic close-up on the screen.
 
 **Visual:** Terminal screen, `mazu chat` is typed, quickly "we use PostgreSQL" is entered. Cut — a different day, a new session, a question is asked: "what database do we use?" — the answer comes back instantly, correct.
 
-**Voiceover:** "Mazu doesn't forget. Decisions, conventions, mistakes — all remembered."
+**Voiceover:** "Mazu keeps a memory of your project. Decisions, conventions, mistakes — saved locally, and you can see and edit all of it."
 
 **Seedance2/Minimax prompt:**
 ```
@@ -36,11 +36,10 @@ Tech/developer aesthetic, subtle glow on cursor, fast confident typing animation
 
 ---
 
-## Scene 3 (14-26s) — Branching Checkpoints (the real differentiator)
+## Scene 3 (14-26s) — Rollback and Branching
 
-Split into two beats: (3a) a mistake gets undone, then (3b) — the part almost no
-other agent does — one point in time splits into two parallel paths that get
-compared side by side.
+Split into two beats: (3a) a mistake gets undone, then (3b) one point in time
+splits into two parallel paths that get compared side by side.
 
 ### 3a — Rollback (6s)
 
@@ -73,11 +72,11 @@ data-visualization aesthetic, smooth motion.
 
 ---
 
-## Scene 4 (26-34s) — Free, Local
+## Scene 4 (26-34s) — Local Models
 
-**Visual:** A Wi-Fi/cloud icon fades out with a strike-through, a "$0" symbol appears, the laptop keeps working locally.
+**Visual:** A Wi-Fi/cloud icon fades out with a strike-through, a "$0" symbol appears, the laptop keeps working locally with a local model.
 
-**Voiceover:** "No internet required. No cost. Runs entirely on your own machine."
+**Voiceover:** "Point it at a model on your own machine, and there's no cloud account and no per-token bill. Prefer a cloud model? Mazu works with those too, with a spending limit you set."
 
 **Seedance2/Minimax prompt:**
 ```
@@ -92,7 +91,7 @@ gears/chip icon). Minimal, clean, green accent color for "free/local" theme.
 
 **Visual:** The Mazu ASCII-art logo assembles on screen, a GitHub star icon appears beside it. Text overlay fades in: "Fully open source. Looking for serious contributors."
 
-**Voiceover:** "Mazu — the coding agent that never forgets. Fully open source, and looking for serious contributors. Join us on GitHub."
+**Voiceover:** "Mazu — a coding agent with a memory you can inspect and a history you can undo. Fully open source, and looking for contributors. Join us on GitHub."
 
 **Seedance2/Minimax prompt:**
 ```

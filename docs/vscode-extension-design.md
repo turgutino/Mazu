@@ -1,6 +1,6 @@
 # Mazu for VS Code / Cursor — design document
 
-**Status: design only, not started.** This is Phase L of [ROADMAP.md](../ROADMAP.md), deliberately scoped as a design document, not an implementation task, until there's a real signal that people want it (see [Why this is a separate project](#why-this-is-a-separate-project)). Nothing in this document is committed; it exists so that *if* work starts, it starts from an informed plan instead of a blank page — and so a specific, concrete prerequisite gap in the Mazu CLI itself (documented below) doesn't get discovered halfway through implementation.
+**Status: design only, not started, and not currently planned** (see [ROADMAP.md](../ROADMAP.md), "Directional"). It is written down so that *if* work starts, it starts from an informed plan, and so the remaining prerequisite in the Mazu CLI itself (structured diffs, below) is known up front. Nothing in this document is committed.
 
 ## What Mazu currently is
 
@@ -10,27 +10,20 @@ Mazu is a Python CLI (`mazu.cli:main`, a `click.Group`). Every command is a fres
 
 Not a Mazu CLI feature — a VS Code/Cursor extension is a different language (TypeScript), a different packaging/distribution mechanism (the VS Code Marketplace, `vsce`), a different runtime (Node.js inside the editor's extension host), and a different repository structure (most likely its own repo, `mazu-vscode` or similar, not a subdirectory of this Python package). Bundling it into this repo would couple two release cadences and two toolchains that have no reason to be coupled. If this ever gets built, it should be scaffolded as its own project that depends on Mazu (the CLI) being installed, the same way a VS Code Python extension depends on `python` being installed, not the other way around.
 
-## The core prerequisite gap: Mazu has no machine-readable output today
+## The integration surface: JSON over a subprocess
 
-This is the single most important finding of this design pass, and the reason implementation shouldn't start without addressing it first.
+Originally this was the main blocker: every command printed human-formatted text only, so an extension could either parse fragile terminal output or read the SQLite files directly and couple itself to an unversioned schema. That gap is **mostly closed**:
 
-**Every command's output is plain, human-formatted text via `click.echo(f"...")`.** There is no `--json` flag, no `--format` option, anywhere in `mazu/cli.py`. `mazu memory list`, `mazu timeline`, `mazu log show`, `mazu runs`, `mazu usage`, `mazu models` — all of it is strings meant for a terminal, padded and aligned for human eyes (`f"{key:<32} {stream:<7} ..."` in `mazu models`, for example). An extension has two ways to get data out of Mazu today, and both are worse than they should be:
+- `mazu timeline`, `mazu memory list`, `mazu log` / `mazu log show`, `mazu runs`, and `mazu models` accept `--json` and emit one versioned envelope, `{"schema_version": 1, "mazu_version": "...", "data": ...}`, built by a single helper (`mazu/output.py`). An extension can declare a minimum Mazu version and fail loudly on a mismatch instead of silently misparsing.
+- `mazu chat --list --json` lists past chat sessions the same way.
+- The data layer underneath was already structured: `MemoryStore`, `CheckpointManager`, `ActionLogStore`, `RunStore`, and `UsageStore` return dicts and rows; only `cli.py` turns them into text.
 
-1. **Parse the CLI's text output.** Fragile by construction — a wording change in `cli.py` (which nothing currently protects against, since nothing consumes that output programmatically) silently breaks the extension. Not viable for anything beyond a trivial "is this thing installed" check.
-2. **Read the SQLite files / `checkpoints/index.json` directly**, bypassing the CLI entirely. More stable than #1, but couples the extension to Mazu's internal schema (table names, column names — see the table below), which isn't a public contract today and could change between Mazu versions without warning. Also awkward from Node.js (needs a SQLite driver, and has to reimplement business logic like "what counts as an active memory" — `superseded_by IS NULL` — that currently lives in Python, not in the schema itself).
+**Still missing:**
 
-Neither is good enough for a real extension. **The actual prerequisite work, before any extension code gets written, is adding a machine-readable read layer to Mazu itself.**
+- **Structured diffs.** `checkpoint diff`, `compare`, and the rollback preview wrap `git diff --stat` text. A real diff view needs per-file `{path, status, additions, deletions}`, which means parsing `git diff --numstat` and `--name-status`. This is real work, not just a flag, and it blocks the checkpoint-diff panel below.
+- `mazu usage` and `mazu checkpoint list/show` do not have `--json` yet.
 
-### Recommended shape for that read layer
-
-Not literally speccing this now (that's its own design pass, in this repo, as a normal ROADMAP item if it's ever prioritized) — but the shape that fits best given what already exists:
-
-- Every read-oriented store method already returns `list[dict]` / `dict` / `sqlite3.Row`, not pre-formatted strings — `MemoryStore`, `CheckpointManager` (`inspect_conversation`, `inspect_memory`, `show_entry`, `timeline_entries`, `list_checkpoints`), `ActionLogStore`, `RunStore`, `UsageStore` all already have a clean data layer underneath the CLI's text formatting. `cli.py` is the *only* layer that stringifies them.
-- The two exceptions: `CheckpointManager.diff_against_current()`/`compare()`/`preview_rollback()` return raw `git diff --stat` text, not structured per-file data (added lines/removed lines/status). A real diff view in an extension needs this restructured (`git diff --numstat`/`--name-status`, parsed into a list of `{path, status, additions, deletions}`) — this is real, non-trivial work, not just "add `--json`."
-- Cheapest viable option: add `--json` to the specific read commands an extension would actually call (`memory list`, `checkpoint list/show`, `timeline`, `log`/`log show`, `runs`, `usage`, `models`), serializing the same dicts the Python layer already produces. Keeps one code path (CLI) as the only integration surface, versioned the same way the CLI itself is versioned (`mazu --version`), so the extension can declare a minimum supported Mazu version and fail loudly on mismatch instead of silently misparsing.
-- More involved option: a small internal-only export surface (e.g. `mazu _internal export <resource> --json`, underscore-prefixed to signal "not a public interactive command, no stability promise beyond what the extension itself pins to") that wraps the store classes directly, decoupled from the human-facing command output evolving independently. Worth it only if the human-facing text output and the machine-readable shape genuinely need to diverge; likely overkill for a v1.
-
-Either way: **JSON over stdout from a subprocess, not a socket/HTTP server.** Introducing a long-running daemon is a much bigger step (process lifecycle management, port/socket conflicts, auth if it's ever a shared machine) for a feature that's fundamentally "run a command, get structured data back, render it" — every case below fits a request/response subprocess call.
+The integration should stay **JSON over stdout from a subprocess, not a socket or HTTP server.** A long-running daemon brings process lifecycle, port and socket conflicts, and authentication concerns for a feature that is fundamentally "run a command, get structured data, render it."
 
 ## What the extension would actually show
 
@@ -56,8 +49,8 @@ The extension must not weaken any safety property the CLI already has: destructi
 
 ## Explicitly out of scope for this design pass
 
-- Actual implementation — this document, not code, is the Phase L deliverable.
-- The prerequisite read-layer work in the Python CLI itself — flagged here as a real, concrete blocker, but scoped as its own future ROADMAP item in *this* repo if it's ever prioritized, not part of the extension project.
+- Actual implementation.
+- The structured-diff work in the Python CLI itself, which would be its own item in *this* repo if prioritized, not part of the extension project.
 - An in-editor chat/run UI (see "What the extension would actually show" above) — deliberately excluded from v1 scope, revisit only if the read-only panels prove valuable first.
 - JetBrains/other-editor support — VS Code/Cursor only, since Cursor's popularity is exactly the reason this phase exists on the roadmap at all.
 
