@@ -72,11 +72,11 @@ def _git(args: list[str], cwd: Path | None = None) -> None:
 
 def _trial_environment(trial_home: Path, config: Config) -> dict:
     env = dict(os.environ)
-    real_home = Path.home()
-    # git reads user.name/email from HOME; point it at the real file explicitly.
-    real_gitconfig = real_home / ".gitconfig"
-    if real_gitconfig.exists() and "GIT_CONFIG_GLOBAL" not in env:
-        env["GIT_CONFIG_GLOBAL"] = str(real_gitconfig)
+    # Git's global config must live INSIDE the trial. Pointing GIT_CONFIG_GLOBAL at the real
+    # ~/.gitconfig (as an earlier version did, so commits would have an identity) lets anything the
+    # trial runs, such as the project's own tests calling `git config --global`, overwrite the
+    # developer's real git identity. run_trial copies the real file in; writes stay in the trial.
+    env["GIT_CONFIG_GLOBAL"] = str(trial_home / ".gitconfig")
     env["HOME"] = str(trial_home)
     env["USERPROFILE"] = str(trial_home)
     env["PYTHONIOENCODING"] = "utf-8"
@@ -142,6 +142,9 @@ def run_trial(
         real_config = Path.home() / ".mazu" / "config.toml"
         if real_config.exists():
             shutil.copy2(real_config, trial_home / ".mazu" / "config.toml")
+        real_gitconfig = Path.home() / ".gitconfig"
+        if real_gitconfig.exists():
+            shutil.copy2(real_gitconfig, trial_home / ".gitconfig")
 
         _git(["clone", "--quiet", "--local", str(task.repo), str(clone)])
         if task.ref:

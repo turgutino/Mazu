@@ -188,3 +188,30 @@ def test_parallel_workers_record_every_trial_once_and_actually_overlap(repo, tmp
     assert len(results) == 8 and all(r["passed"] for r in results)
     assert 2 <= state["peak"] <= 4  # really parallel, never more than the limit
     assert run_suite(tasks, [Config("a")], 2, out, run_agent=slow_agent, workers=4) == []  # still resumable
+
+
+def test_a_trial_cannot_overwrite_the_real_global_git_identity(repo, tmp_path, monkeypatch):
+    """Regression: the runner once pointed GIT_CONFIG_GLOBAL at the real ~/.gitconfig, so the project's
+    own tests (which run `git config --global user.name Test`) rewrote the developer's real identity."""
+    fake_home = tmp_path / "realhome"
+    fake_home.mkdir()
+    real_gitconfig = fake_home / ".gitconfig"
+    real_gitconfig.write_text("[user]\n\tname = Real Person\n\temail = real@example.com\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("USERPROFILE", str(fake_home))
+    monkeypatch.delenv("GIT_CONFIG_GLOBAL", raising=False)
+    seen = {}
+
+    def agent(clone, task, config, env, timeout):
+        seen["identity_visible"] = subprocess.run(
+            ["git", "config", "--global", "user.name"], cwd=clone, env=env, capture_output=True, text=True
+        ).stdout.strip()
+        subprocess.run(["git", "config", "--global", "user.name", "Polluted"], cwd=clone, env=env, check=True)
+        return make_fake_agent(True)(clone, task, config, env, timeout)
+
+    result = run_trial(Task("t", str(repo), "p", _verify_cmd()), Config("a"), 0, tmp_path, run_agent=agent)
+
+    assert result["passed"]
+    assert seen["identity_visible"] == "Real Person"  # the trial still gets the identity it needs for commits
+    assert "Real Person" in real_gitconfig.read_text(encoding="utf-8")
+    assert "Polluted" not in real_gitconfig.read_text(encoding="utf-8")
