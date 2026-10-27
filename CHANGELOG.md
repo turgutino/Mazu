@@ -5,7 +5,9 @@ All notable changes to Mazu are documented here, newest first. Format loosely fo
 ## Unreleased
 
 - **Added `mazu bench run --workers N`** to run trials in parallel (trials are independent, so only wall-clock time changes; results are still appended one line per trial and the run stays resumable).
-- **Added `mazu run --protect-tests`** (off by default, experimental): appends a rule to the system prompt telling the agent not to edit, delete, or weaken existing tests to make its change pass. Added because the first benchmark baseline showed an agent rewriting an existing test to fit its own fix. A first trial (19/25 versus 10/15, intervals overlapping) was not conclusive; `bench/analysis_plan.md` fixes how a confirmation run will be judged before it starts.
+- **Added `mazu run --protect-tests`** (off by default, experimental): appends a rule to the system prompt telling the agent not to edit, delete, or weaken existing tests to make its change pass. Added because the first benchmark baseline showed an agent rewriting an existing test to fit its own fix. A first small trial (19/25 versus 10/15) did not hold up in a confirmation run judged by a rule fixed in advance (`bench/analysis_plan.md`): 24/35 versus 25/35 on the real-bug suite and 24/27 versus 27/27 on the new injected-bug suite. It stays off by default.
+- **Added `bench/mutation_bugs`**: 9 one-line bugs injected into Mazu's own code, each proved fair by `--check`, plus the results write-up `bench/RESULTS.md`.
+- **Fixed:** `mazu bench` pointed each trial's git config at the developer's real `~/.gitconfig`, so the project's own tests running inside a trial (`git config --global user.name Test`) rewrote the real git identity. Each trial now gets its own copy.
 - `bench/compare_configs.py`: permutation test (shuffled within tasks) for comparing two configs in a results file.
 
 ## 0.25.2 — Fixed `mazu bench` crashing on Python 3.11

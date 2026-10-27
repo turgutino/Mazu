@@ -130,7 +130,7 @@ A git subtlety if you touch this code: `git diff <commit> HEAD` compares two com
 
 ## Known structural caveats
 
-- **Restore is sequential, not atomic.** An interruption between its steps can leave code rolled back while memory, skills, or the index are not. There is no fault-injection test for `restore` (only a snapshot-failure test exists).
+- **Restore is sequential, not atomic.** An interruption between its steps can leave code rolled back while memory or skills are not. `tests/test_checkpoint_restore_interruption.py` makes each of the 7 steps fail in turn: 4 of them leave a mixed state, and running restore again repaired all of them. A process killed in the middle of writing a file (power loss, `kill -9`) is not covered.
 - **`run_skill` is ungated in `mazu run`**, and skills run with Mazu's privileges and environment without isolation.
 - **The shell denylist and allowlist are string matching**, not a sandbox.
 - **mazu-web duplicates the chat loop** (`mazu_web/chat_session.py`) instead of calling `agent/loop.py`, so chat-loop changes here (such as `--max-cost`) do not reach its Chat tab automatically; its Run, Explore, and Council tabs call the same functions as the terminal.

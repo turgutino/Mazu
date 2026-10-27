@@ -31,7 +31,7 @@ Mazu runs on your own machine: the agent loop, tool execution, memory database, 
 - **Skills are arbitrary Python** executed as a subprocess with the same privileges and environment variables as Mazu itself, including any API keys in the environment, and no isolation. In `mazu run`, saved skills are executed **without a confirmation prompt** and `--allow-shell` does not govern them; in `mazu chat` they ask first. A skill written by the agent, or one you did not review, is equivalent to running arbitrary code.
 - **Checkpoints cannot undo external actions**, such as a push, a sent request, or anything outside the project directory and Mazu's own state.
 - **Memory is trusted.** Facts extracted automatically from a session are stored and later shown to the model as established context. Content the agent read (a file, a command's output) can end up in memory, and Mazu does not verify or label it. If you work with untrusted repositories, review `mazu memory list` and use `mazu memory forget` on anything wrong.
-- **`restore` is not atomic.** If a rollback is interrupted partway, code may be restored while memory, skills, or the checkpoint index are not.
+- **`restore` is not atomic.** If a rollback is interrupted partway, code may be restored while memory or skills are not. Running the rollback again repaired every interruption point in the project's tests, which simulate a failure between steps; a process killed mid-write is not covered.
 
 **Practical advice:** run unattended agents (`mazu run --allow-shell`, `mazu explore`) in a disposable directory, a throwaway clone, or a container; set `--max-cost`; keep API keys scoped and low-limit; review `mazu log show <session>` afterwards.
 

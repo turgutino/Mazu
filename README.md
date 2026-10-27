@@ -28,19 +28,20 @@ Mazu is not an IDE and does not try to out-polish editor-integrated agents. Its 
 
 ## Measured so far
 
-Mazu ships with a benchmark built from its own history, in [`bench/mazu_history`](bench/mazu_history): five real bugs that were fixed in this repository, each checked out at the commit *before* its fix, described to the agent by symptom only, and judged by the regression tests the real fix added. Those tests are kept outside the clone and copied in only after the agent finishes, so the agent cannot see or edit them. `--check` proves every task is fair without calling a model: the unfixed commit must fail its test and the real fix must pass it.
+Mazu ships with benchmarks built from its own code, judged only by hidden tests that the agent cannot see or edit (they are kept outside the clone and copied in after the agent finishes). `--check` on each suite proves every task is fair without calling a model: the unfixed code must fail its test and the fix must pass it. Full numbers, caveats, and how to reproduce them are in [bench/RESULTS.md](bench/RESULTS.md).
 
-First baseline, `deepseek:deepseek-chat`, 3 repeats per task (15 trials), judged only by the hidden tests:
+All numbers below are `deepseek:deepseek-chat`, plain `mazu run`, 95% Wilson intervals:
 
-| | Result |
-|---|---|
-| Pass rate | 10 / 15 = 67% (95% Wilson interval 42%–85%) |
-| Mean cost per trial | about $0.035 |
-| Cost per solved task | about $0.052 |
+| Suite | What it is | Pass rate | Cost per solved task |
+|---|---|---|---|
+| [`bench/mazu_history`](bench/mazu_history) | 5 real bugs from this repository's own history, each checked out at the commit before its fix, described by symptom only | 25 / 35 = 71% (55%-84%) | about $0.051 |
+| [`bench/mutation_bugs`](bench/mutation_bugs) | 9 one-line bugs injected into Mazu's current code | 27 / 27 = 100% (88%-100%) | about $0.022 |
 
-Per task, three tasks passed 3/3, one passed 1/3 (in the failing runs the agent changed an existing test to fit its own fix), and one passed 0/3. Most runs used the whole 25-step budget even when they passed.
+Per task, on the real-bug suite: three tasks passed almost every time, one (`windows-non-ascii-output`) passed 6/7, and one, `restore-open-connection` (an open SQLite connection makes a rollback silently not revert the database), passed **0 of 22** trials across the pilot and confirmation runs, with either configuration. The injected-bug suite is a ceiling: everything passes, so it cannot tell two configurations apart.
 
-What this does **not** show: it is a small suite from one repository, and Mazu has not been compared head-to-head with any other coding agent or with a more expensive model on the same tasks. Treat the numbers as a baseline for measuring changes, not as a ranking.
+An experimental prompt rule (`mazu run --protect-tests`, "do not edit existing tests") looked helpful in a first small run (19/25 against 10/15) and did not hold up in a confirmation run whose analysis was fixed in advance ([bench/analysis_plan.md](bench/analysis_plan.md)): 24/35 against 25/35 on the real bugs and 24/27 against 27/27 on the injected ones. It is off by default and not shown to help.
+
+What this does **not** show: the suites are small, come from one repository the model may have seen, and use one model. Mazu has not been compared head-to-head with any other coding agent or with a more expensive model on the same tasks. Treat the numbers as a measured baseline for judging changes, not as a ranking.
 
 ## Install
 
@@ -90,7 +91,7 @@ In `mazu chat`: `/checkpoint` snapshots now, `/rollback [id]` restores, `/compac
 | Command | Purpose |
 |---|---|
 | `mazu chat` | Interactive session. `--model`, `--max-cost USD`, `--shell-allowlist`, `--auto-approve`, `--resume ID`, `--list`, `--delete ID` |
-| `mazu run "task"` | Unattended multi-step run. `--max-steps` (default 15), `--max-cost USD`, `--allow-shell`, `--shell-allowlist`, `--dry-run`, `--checkpoint-every`, `--keep-checkpoints`, `--model`, `--auto-commit-baseline`, `--protect-tests` (experimental: tells the agent not to edit existing tests; not shown to help yet) |
+| `mazu run "task"` | Unattended multi-step run. `--max-steps` (default 15), `--max-cost USD`, `--allow-shell`, `--shell-allowlist`, `--dry-run`, `--checkpoint-every`, `--keep-checkpoints`, `--model`, `--auto-commit-baseline`, `--protect-tests` (experimental: tells the agent not to edit existing tests; a pre-registered test found no benefit) |
 | `mazu run --resume ID` | Continue a stopped run from its last checkpoint |
 | `mazu run --from-checkpoint CP --branch NAME "task"` | Start a divergent run on a new git branch from a checkpoint |
 | `mazu runs` | List recent runs: status, stop reason, steps |
@@ -190,7 +191,7 @@ See [SECURITY.md](SECURITY.md) for the policy and how to report a vulnerability.
 ## Known limitations
 
 - **No verification step.** The agent decides for itself when it is done, and nothing re-runs your tests before it stops. In the baseline above, an agent twice edited an existing test to fit its change.
-- **Rollback is not atomic.** `restore` resets git, then restores memory, skills, and the index in sequence. If it is interrupted midway, code may be rolled back while memory or the index is not. There is no fault-injection test for this yet.
+- **Rollback is not atomic.** `restore` resets git, then restores memory, skills, and the index in sequence. If it is interrupted midway, code may be rolled back while memory or skills are not (4 of its 7 steps leave that mixed state when interrupted), but running `mazu rollback` again repairs it. This is tested by making each step fail in turn; a process killed in the middle of writing a file has not been tested.
 - **Memory is not verified.** Auto-extracted memories are injected into the prompt as established context, with no trust level. Contradictions between memories are detected in shadow mode only (logged, never acted on), so a wrong remembered fact can persist until you edit or forget it. Auto-extraction keeps short summaries, not the raw conversation. Memory quality has not been benchmarked.
 - **Memory growth is manual to clean up.** At most 5 memories are added per session and the prompt block is bounded, but the database itself only shrinks through `consolidate`, `stale`, `forget`, or Curator.
 - **Small evidence base.** The benchmark covers five bugs from one repository, with one model, and no comparison against other agents. Context compaction and memory extraction are not exercised by those short tasks.
