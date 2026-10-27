@@ -2,6 +2,11 @@
 
 All notable changes to Mazu are documented here, newest first. Format loosely follows [Keep a Changelog](https://keepachangelog.com/); Mazu doesn't yet promise strict semver (see [ROADMAP.md](ROADMAP.md) for what "1.0" would mean) — treat version bumps as "a meaningful batch of work shipped," not a compatibility contract.
 
+## 0.25.2 — Fixed `mazu bench` crashing on Python 3.11
+
+- **Fixed:** `mazu bench` removed each trial's cloned repository with `shutil.rmtree(..., onexc=...)`, a parameter that only exists from Python 3.12. On Python 3.11, the project's minimum supported version, every trial crashed at cleanup. It now uses `onerror` on 3.11 and `onexc` on 3.12+ (`mazu/bench/runner.py`), checked on 3.11.4 and 3.13.5 against read-only git object files. This affected 0.25.0 and 0.25.1. Found by the project's CI, which runs 3.11.
+- Test only: the Anthropic model-list test now builds its `ModelInfo` with `model_construct`, so newer SDK releases that add required fields no longer break it.
+
 ## 0.25.1 — Documentation rewritten to match the current code
 
 - **Documentation rewritten to match the current code:** `README.md` (also the PyPI description), `ARCHITECTURE.md`, `ROADMAP.md`, `SECURITY.md`, `CONTRIBUTING.md`, the VS Code design note, and the promo script. The README now states the first benchmark baseline and lists known limitations plainly (shell denylist and allowlist are not a sandbox, `run_skill` is not gated in `mazu run`, `restore` is not atomic, memory is not verified). No code changes; the PyPI description is now the rewritten README.
