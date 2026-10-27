@@ -28,3 +28,7 @@ Pass rate with Wilson 95% interval per config; per-task pass counts; cost per tr
 ## What this run cannot show
 
 Five tasks from one repository, one model, no comparison with other agents or models. Task difficulty is not representative of general coding work. The model may have seen this public repository. A result here describes this suite, not coding agents in general.
+
+## Addendum, 2026-10-27 (before any trial on this second suite exists)
+
+A second suite, `bench/mutation_bugs` (9 one-line bugs injected into Mazu's own code, hidden tests, each task proved fair by `--check`), is run with the same two configs, 3 repeats per task per config (27 trials per config), as its own results file. It is analysed separately with the same script and the same decision rule; the two suites are not pooled, and a result on this suite does not override the confirmation run above. These bugs are synthetic and one-line, so a ceiling effect (almost everything passing) is possible, in which case the suite simply cannot tell the configs apart and will be reported that way.
