@@ -2,7 +2,9 @@
 
 All notable changes to Mazu are documented here, newest first. Format loosely follows [Keep a Changelog](https://keepachangelog.com/); Mazu doesn't yet promise strict semver (see [ROADMAP.md](ROADMAP.md) for what "1.0" would mean) — treat version bumps as "a meaningful batch of work shipped," not a compatibility contract.
 
-## Unreleased
+## 0.25.0 — `mazu bench`, full-spend cost tracking, `mazu chat --max-cost`
+
+This release also includes everything listed under 0.24.2 below (0.24.2 was never published to PyPI on its own).
 
 - `mazu run --max-cost` now includes compaction and final memory-extraction spend in its run and shared-budget totals. Added `mazu chat --max-cost` to cap estimated spend across the full chat session.
 - `mazu chat` now prints a final session total that includes compaction and memory-extraction calls, and labels the per-call running total as main-chat-only.
