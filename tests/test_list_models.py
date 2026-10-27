@@ -26,7 +26,10 @@ from mazu.llm.providers.openai_provider import OpenAIProvider
 
 
 def _anthropic_model(model_id: str) -> ModelInfo:
-    return ModelInfo(
+    # model_construct skips validation: newer anthropic SDK releases added required fields
+    # (e.g. `lifecycle`) that this test does not care about and that CI, which installs the
+    # latest SDK, would otherwise reject. The object is still a real ModelInfo.
+    return ModelInfo.model_construct(
         id=model_id, created_at=datetime.now(timezone.utc), display_name=model_id, type="model"
     )
 

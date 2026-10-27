@@ -26,14 +26,19 @@ def remove_tree(path: Path) -> None:
     Windows plain shutil.rmtree(..., ignore_errors=True) silently leaves such a clone behind."""
     import stat
 
-    def _onexc(func, p, exc):
+    def _make_writable_and_retry(func, p, _exc):
         try:
             os.chmod(p, stat.S_IWRITE)
             func(p)
         except OSError:
             pass
 
-    shutil.rmtree(path, onexc=_onexc)
+    # `onexc` replaced the deprecated `onerror` in Python 3.12; 3.11 (our minimum) only has `onerror`.
+    # Both call the handler as (function, path, error-info), and this handler ignores the last argument.
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=_make_writable_and_retry)
+    else:
+        shutil.rmtree(path, onerror=_make_writable_and_retry)
 
 
 def default_run_agent(clone: Path, task: Task, config: Config, env: dict, timeout: int) -> tuple[int, str]:
