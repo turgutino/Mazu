@@ -630,6 +630,14 @@ def chat(
     "default -- an unattended run silently committing your in-progress changes is "
     "surprising unless you've opted in.",
 )
+@click.option(
+    "--protect-tests",
+    is_flag=True,
+    default=False,
+    help="Tell the agent not to edit, delete or weaken existing tests to make its change "
+    "pass. Off by default; added after a benchmark showed agents rewriting a passing test "
+    "to fit their own fix.",
+)
 def run(
     task: str | None,
     max_steps: int,
@@ -644,6 +652,7 @@ def run(
     fork_branch_name: str | None,
     model: str | None,
     auto_commit_baseline: bool,
+    protect_tests: bool,
 ) -> None:
     """Run a task autonomously (multi-step, unattended), checkpointing along the way."""
     root = Path.cwd()
@@ -768,6 +777,7 @@ def run(
         branch_name=branch_name,
         belief_log=belief_log,
         auto_commit_baseline=auto_commit_baseline,
+        protect_tests=protect_tests,
     )
 
 
@@ -2286,7 +2296,12 @@ def bench_group() -> None:
 @click.option("--out", "results_path", default=Path("bench-results.jsonl"), show_default=True, type=click.Path(path_type=Path),
               help="Append-only results file. Re-running resumes: already-recorded trials are skipped.")
 @click.option("--agent-timeout", default=1800, show_default=True, type=int, help="Seconds before one agent run is killed.")
-def bench_run(suite_path: Path, configs_path: Path, repeats: int, results_path: Path, agent_timeout: int) -> None:
+@click.option("--workers", default=1, show_default=True, type=click.IntRange(min=1, max=16),
+              help="Trials to run at the same time. Trials are independent, so this only saves wall-clock time; "
+              "spend is the same, but a provider may rate-limit many parallel requests.")
+def bench_run(
+    suite_path: Path, configs_path: Path, repeats: int, results_path: Path, agent_timeout: int, workers: int
+) -> None:
     """Run the suite. THIS MAKES REAL, BILLED MODEL CALLS: tasks x configs x repeats runs."""
     from mazu.bench.runner import load_results, run_suite
     from mazu.bench.spec import load_configs, load_suite
@@ -2305,7 +2320,7 @@ def bench_run(suite_path: Path, configs_path: Path, repeats: int, results_path: 
         verdict = "PASS" if r["passed"] else ("ERROR" if r.get("error") else "fail")
         click.echo(f"  [{r['repeat'] + 1}] {r['task']} / {r['config']}: {verdict}  ${r.get('cost_usd') or 0:.4f}  {r.get('duration_s', 0)}s")
 
-    run_suite(tasks, configs, repeats, results_path, agent_timeout=agent_timeout, on_result=_progress)
+    run_suite(tasks, configs, repeats, results_path, agent_timeout=agent_timeout, on_result=_progress, workers=workers)
     click.echo("")
     click.echo(format_report(summarize(load_results(results_path))))
 

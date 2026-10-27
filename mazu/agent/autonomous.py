@@ -1,6 +1,7 @@
 from mazu.action_log.store import ActionLogStore, record_action
 from mazu.agent.compaction import compact_if_needed, force_compact
 from mazu.agent.context import build_system_prompt
+from mazu.agent.prompts import PROTECT_TESTS_NOTE
 from mazu.agent.council import _SharedCostTracker
 from mazu.agent.interaction import safe_confirm
 from mazu.agent.session import finalize_session
@@ -79,6 +80,7 @@ def run_autonomous(
     shared_cost_tracker: "_SharedCostTracker | None" = None,
     belief_log: "BeliefShadowLogStore | None" = None,
     auto_commit_baseline: bool = False,
+    protect_tests: bool = False,
 ) -> None:
     # The clean-baseline requirement exists so a real run's checkpoints are
     # meaningful diffs against a known-good starting point. A dry run never writes
@@ -124,6 +126,8 @@ def run_autonomous(
     system_prompt = build_system_prompt(
         memory_store, skill_manager, query=task, global_memory_store=global_memory_store
     )
+    if protect_tests:
+        system_prompt += "\n\n" + PROTECT_TESTS_NOTE
 
     provider_name, model_name = _split_model(model or default_model())
     resolved_model = f"{provider_name}:{model_name}"

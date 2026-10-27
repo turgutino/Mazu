@@ -2,6 +2,12 @@
 
 All notable changes to Mazu are documented here, newest first. Format loosely follows [Keep a Changelog](https://keepachangelog.com/); Mazu doesn't yet promise strict semver (see [ROADMAP.md](ROADMAP.md) for what "1.0" would mean) — treat version bumps as "a meaningful batch of work shipped," not a compatibility contract.
 
+## Unreleased
+
+- **Added `mazu bench run --workers N`** to run trials in parallel (trials are independent, so only wall-clock time changes; results are still appended one line per trial and the run stays resumable).
+- **Added `mazu run --protect-tests`** (off by default, experimental): appends a rule to the system prompt telling the agent not to edit, delete, or weaken existing tests to make its change pass. Added because the first benchmark baseline showed an agent rewriting an existing test to fit its own fix. A first trial (19/25 versus 10/15, intervals overlapping) was not conclusive; `bench/analysis_plan.md` fixes how a confirmation run will be judged before it starts.
+- `bench/compare_configs.py`: permutation test (shuffled within tasks) for comparing two configs in a results file.
+
 ## 0.25.2 — Fixed `mazu bench` crashing on Python 3.11
 
 - **Fixed:** `mazu bench` removed each trial's cloned repository with `shutil.rmtree(..., onexc=...)`, a parameter that only exists from Python 3.12. On Python 3.11, the project's minimum supported version, every trial crashed at cleanup. It now uses `onerror` on 3.11 and `onexc` on 3.12+ (`mazu/bench/runner.py`), checked on 3.11.4 and 3.13.5 against read-only git object files. This affected 0.25.0 and 0.25.1. Found by the project's CI, which runs 3.11.

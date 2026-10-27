@@ -158,3 +158,33 @@ def test_cli_report_and_validation(tmp_path):
     bad.write_text("[]")
     out = CliRunner().invoke(main, ["bench", "run", "--suite", str(bad), "--configs", str(bad)])
     assert out.exit_code != 0 and "non-empty" in out.output
+
+
+def test_parallel_workers_record_every_trial_once_and_actually_overlap(repo, tmp_path):
+    import threading
+    import time
+
+    lock = threading.Lock()
+    state = {"now": 0, "peak": 0}
+    inner = make_fake_agent(True)
+
+    def slow_agent(clone, task, config, env, timeout):
+        with lock:
+            state["now"] += 1
+            state["peak"] = max(state["peak"], state["now"])
+        time.sleep(0.4)
+        try:
+            return inner(clone, task, config, env, timeout)
+        finally:
+            with lock:
+                state["now"] -= 1
+
+    tasks = [Task(f"t{i}", str(repo), "p", _verify_cmd()) for i in range(4)]
+    out = tmp_path / "par.jsonl"
+    results = run_suite(tasks, [Config("a")], 2, out, run_agent=slow_agent, workers=4)
+
+    keys = sorted((r["task"], r["repeat"]) for r in load_results(out))
+    assert keys == sorted((f"t{i}", rep) for i in range(4) for rep in range(2))  # 8 distinct, none lost or doubled
+    assert len(results) == 8 and all(r["passed"] for r in results)
+    assert 2 <= state["peak"] <= 4  # really parallel, never more than the limit
+    assert run_suite(tasks, [Config("a")], 2, out, run_agent=slow_agent, workers=4) == []  # still resumable

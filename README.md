@@ -90,7 +90,7 @@ In `mazu chat`: `/checkpoint` snapshots now, `/rollback [id]` restores, `/compac
 | Command | Purpose |
 |---|---|
 | `mazu chat` | Interactive session. `--model`, `--max-cost USD`, `--shell-allowlist`, `--auto-approve`, `--resume ID`, `--list`, `--delete ID` |
-| `mazu run "task"` | Unattended multi-step run. `--max-steps` (default 15), `--max-cost USD`, `--allow-shell`, `--shell-allowlist`, `--dry-run`, `--checkpoint-every`, `--keep-checkpoints`, `--model`, `--auto-commit-baseline` |
+| `mazu run "task"` | Unattended multi-step run. `--max-steps` (default 15), `--max-cost USD`, `--allow-shell`, `--shell-allowlist`, `--dry-run`, `--checkpoint-every`, `--keep-checkpoints`, `--model`, `--auto-commit-baseline`, `--protect-tests` (experimental: tells the agent not to edit existing tests; not shown to help yet) |
 | `mazu run --resume ID` | Continue a stopped run from its last checkpoint |
 | `mazu run --from-checkpoint CP --branch NAME "task"` | Start a divergent run on a new git branch from a checkpoint |
 | `mazu runs` | List recent runs: status, stop reason, steps |

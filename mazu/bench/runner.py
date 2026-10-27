@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Callable
@@ -187,27 +188,56 @@ def run_suite(
     run_agent: Callable = default_run_agent,
     agent_timeout: int = 1800,
     on_result: Callable[[dict], None] | None = None,
+    workers: int = 1,
 ) -> list[dict]:
     """Runs every (repeat, task, config) combination, appending each finished trial to
     `results_path` immediately, and skipping combinations already recorded there so an
     interrupted suite can be resumed. Configs are interleaved inside each (repeat, task)
-    so slow drift in provider latency/behaviour hits every config alike."""
+    so slow drift in provider latency/behaviour hits every config alike.
+
+    `workers` > 1 runs that many trials at once. Trials are independent (own clone, own
+    HOME, own temp dir), so this only changes wall-clock time. Trials still START in the
+    same repeat-major order, so a run stopped early has finished whole repeats first;
+    only the order in which finished trials are appended may differ."""
     results_path.parent.mkdir(parents=True, exist_ok=True)
     done = _done_keys(results_path)
     work_root = Path(tempfile.mkdtemp(prefix="mazu-bench-"))
-    new_results = []
+    pending = [
+        (task, config, repeat)
+        for repeat in range(repeats) for task in tasks for config in configs
+        if (task.id, config.name, repeat) not in done
+    ]
+    new_results: list[dict] = []
+    write_lock = threading.Lock()
+
+    def record(result: dict) -> None:
+        with write_lock:
+            with results_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(result) + "\n")
+            new_results.append(result)
+            if on_result:
+                on_result(result)
+
     try:
-        for repeat in range(repeats):
-            for task in tasks:
-                for config in configs:
-                    if (task.id, config.name, repeat) in done:
-                        continue
-                    result = run_trial(task, config, repeat, work_root, run_agent, agent_timeout)
-                    with results_path.open("a", encoding="utf-8") as f:
-                        f.write(json.dumps(result) + "\n")
-                    new_results.append(result)
-                    if on_result:
-                        on_result(result)
+        if workers <= 1:
+            for task, config, repeat in pending:
+                record(run_trial(task, config, repeat, work_root, run_agent, agent_timeout))
+        else:
+            from concurrent.futures import ThreadPoolExecutor
+
+            pool = ThreadPoolExecutor(max_workers=workers)
+            try:
+                futures = [
+                    pool.submit(run_trial, task, config, repeat, work_root, run_agent, agent_timeout)
+                    for task, config, repeat in pending
+                ]
+                for future in futures:
+                    record(future.result())
+            except BaseException:
+                pool.shutdown(wait=False, cancel_futures=True)
+                raise
+            else:
+                pool.shutdown()
     finally:
         remove_tree(work_root)
     return new_results

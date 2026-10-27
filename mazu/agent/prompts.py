@@ -114,6 +114,15 @@ def own_feature_grounding_note(query: str) -> str:
     )
 
 
+PROTECT_TESTS_NOTE = (
+    "Existing tests are the specification of behaviour that already works. Do not edit, delete "
+    "or weaken an existing test (or its expected values) to make your change pass. If a test "
+    "fails after your change, treat that as a sign your fix is wrong or too broad and revise "
+    "the fix. Add new tests freely. Only change an existing test if the task explicitly says "
+    "that test's expectation is itself the bug, and say so in your final message."
+)
+
+
 def build_base_system_prompt() -> str:
     """Re-built on every call (not a frozen module-level constant) so it always
     reflects the current MAZU_WEB_SURFACE env var -- see
